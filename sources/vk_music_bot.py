@@ -440,6 +440,28 @@ class VKMusicBotSource(MusicSource):
                 log_group_id, caption,
             )
 
+            # Pyrogram хранит пиры в локальном SQLite-кэше.
+            # Если userbot ни разу не взаимодействовал с группой — кэша нет → KeyError.
+            # get_chat() принудительно резолвит и кэширует группу перед отправкой.
+            # ТРЕБОВАНИЕ: userbot должен быть участником группы (вступить вручную).
+            try:
+                await self._client.get_chat(log_group_id)
+                print(f"[_get_audio_internal] peer {log_group_id} резолвлен успешно")
+            except Exception as resolve_err:
+                print(
+                    f"[_get_audio_internal] ОШИБКА резолва группы {log_group_id}: {resolve_err}\n"
+                    f"  → Убедитесь: userbot вступил в группу и отправил хотя бы одно сообщение!"
+                )
+                logger.error(
+                    "[_get_audio_internal] не удалось резолвить group=%d: %s",
+                    log_group_id, resolve_err,
+                )
+                raise TrackNotFoundError(
+                    f"Userbot не может найти группу {log_group_id}. "
+                    f"Проверьте: userbot вступил в группу? "
+                    f"Отправьте любое сообщение в группу с аккаунта userbot."
+                ) from resolve_err
+
             # Пересылаем аудио в служебную группу с пометкой target_chat_id.
             # Бот в группе получит родной Bot API file_id и отправит пользователю.
             await self._client.send_audio(
