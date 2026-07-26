@@ -1,9 +1,8 @@
 import asyncio
 import logging
+import logging.handlers
+import os
 
-# BUG FIX: pyrogram 2.0.106 calls asyncio.get_event_loop() at import time.
-# uvloop replaces the default event loop policy and raises RuntimeError when
-# get_event_loop() is called before any loop has been created.
 asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
@@ -32,20 +31,37 @@ from bot.handlers import inline, inline_download, inline_feedback
 from bot.middlewares.i18n import I18nMiddleware
 from bot.handlers import settings as settings_handler, favorites, popular
 
-logging.basicConfig(
-    level=settings.LOG_LEVEL,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+
+def _setup_logging() -> None:
+    """Configure logging to both stdout and a rotating file at project root."""
+    log_level = getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO)
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+
+    console = logging.StreamHandler()
+    console.setFormatter(fmt)
+
+    # Rotating file handler — max 5 MB × 3 backup files → bot.log at project root
+    log_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bot.log")
+    file_handler = logging.handlers.RotatingFileHandler(
+        log_path, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
+    )
+    file_handler.setFormatter(fmt)
+
+    root = logging.getLogger()
+    root.setLevel(log_level)
+    root.addHandler(console)
+    root.addHandler(file_handler)
+
+
+_setup_logging()
 logger = logging.getLogger(__name__)
 
 
 async def main() -> None:
-    # ── Redis ──────────────────────────────────────────────────────────────────
     redis = Redis.from_url(settings.REDIS_URL, decode_responses=False)
     storage = RedisStorage(redis=redis)
     cache = CacheManager(redis)
 
-    # ── БД + компоненты ───────────────────────────────────────────────────────
     db_session = async_session_factory()
     await db_session.__aenter__()
 
@@ -61,7 +77,6 @@ async def main() -> None:
         await pool.start()
         await queue.start()
 
-        # ── Bot + Dispatcher ──────────────────────────────────────────────────
         bot = Bot(
             token=settings.BOT_TOKEN,
             default=DefaultBotProperties(parse_mode=ParseMode.HTML),
@@ -73,7 +88,6 @@ async def main() -> None:
         dp["search_manager"] = search_manager
         dp["pool"] = pool
 
-        # ── Middlewares ───────────────────────────────────────────────────────
         dp.message.middleware(ThrottleMiddleware())
         dp.message.middleware(AuthMiddleware())
         dp.message.middleware(RateLimitMiddleware(cache))
@@ -81,11 +95,6 @@ async def main() -> None:
         dp.callback_query.middleware(AuthMiddleware())
         dp.callback_query.middleware(I18nMiddleware())
 
-        # ── Роутеры ───────────────────────────────────────────────────────────
-        # BUG FIX: admin router MUST be first so FSM states (AddUserbotStates,
-        # BroadcastStates) have priority over the catch-all search handler
-        # (F.text & ~F.text.startswith("/")) which would otherwise swallow
-        # every plain-text message including phone numbers and api credentials.
         dp.include_router(admin.router)
         dp.include_router(start.router)
         dp.include_router(subscription.router)
@@ -95,11 +104,8 @@ async def main() -> None:
         dp.include_router(inline.router)
         dp.include_router(inline_download.router)
         dp.include_router(inline_feedback.router)
-        # search router last — its catch-all F.text handler must not intercept
-        # FSM inputs or keyboard button texts handled by routers above
         dp.include_router(search.router)
 
-        # ── Запуск ────────────────────────────────────────────────────────────
         logger.info("Бот запущен")
         try:
             await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())

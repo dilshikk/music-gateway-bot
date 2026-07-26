@@ -1,4 +1,5 @@
 import logging
+import os
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -23,9 +24,15 @@ router = Router(name="admin")
 
 _BACK_BTN = [[InlineKeyboardButton(text="🔙 Назад", callback_data="admin:back")]]
 
+# Log file sits at project root (two levels above this file: bot/handlers/admin.py)
+_LOG_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "bot.log",
+)
+
 
 async def _safe_edit(callback: CallbackQuery, text: str, reply_markup=None) -> None:
-    """Edit message, ignoring 'message is not modified' errors on double-tap."""
+    """Edit message, silently ignoring 'message is not modified' on double-tap."""
     try:
         await callback.message.edit_text(text, reply_markup=reply_markup)
     except TelegramBadRequest as e:
@@ -36,10 +43,16 @@ async def _safe_edit(callback: CallbackQuery, text: str, reply_markup=None) -> N
 def _is_ub_detail(data: str) -> bool:
     """True only for 'admin:ub:{int}' — exactly 3 colon-separated parts."""
     parts = data.split(":")
-    return len(parts) == 3 and parts[2].isdigit()
+    return len(parts) == 3 and parts[0] == "admin" and parts[1] == "ub" and parts[2].isdigit()
 
 
-# ── FSM States ────────────────────────────────────────────────────────────────
+def _is_user_detail(data: str) -> bool:
+    """True only for 'admin:user:{int}' — exactly 3 colon-separated parts."""
+    parts = data.split(":")
+    return len(parts) == 3 and parts[0] == "admin" and parts[1] == "user" and parts[2].isdigit()
+
+
+# ── FSM States ───────────────────────────────────────────────────────────────────────────────
 
 class AddUserbotStates(StatesGroup):
     waiting_phone = State()
@@ -52,7 +65,7 @@ class BroadcastStates(StatesGroup):
     waiting_text = State()
 
 
-# ── Главное меню админа ───────────────────────────────────────────────────────
+# ── Главное меню админа ─────────────────────────────────────────────────────────────────────────────
 
 @router.message(Command("admin"), IsAdmin())
 async def cmd_admin(message: Message, pool: UserbotPool, queue: QueueManager) -> None:
@@ -87,7 +100,8 @@ async def cmd_admin(message: Message, pool: UserbotPool, queue: QueueManager) ->
         reply_markup=keyboard,
     )
 
-# ── Управление Userbot ────────────────────────────────────────────────────────
+
+# ── Управление Userbot ────────────────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "admin:userbots", IsAdmin())
 async def admin_userbots(callback: CallbackQuery, pool: UserbotPool) -> None:
@@ -123,10 +137,7 @@ async def admin_userbots(callback: CallbackQuery, pool: UserbotPool) -> None:
 
 
 @router.callback_query(F.data.func(_is_ub_detail), IsAdmin())
-async def admin_userbot_detail(
-    callback: CallbackQuery,
-    pool: UserbotPool,
-) -> None:
+async def admin_userbot_detail(callback: CallbackQuery, pool: UserbotPool) -> None:
     ub_id = int(callback.data.split(":")[-1])
     entry = next((e for e in pool.list_userbots() if e.id == ub_id), None)
 
@@ -213,7 +224,7 @@ async def admin_ub_delete(callback: CallbackQuery, pool: UserbotPool) -> None:
     )
 
 
-# ── Добавление Userbot через FSM ──────────────────────────────────────────────
+# ── Добавление Userbot через FSM ─────────────────────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "admin:ub:add", IsAdmin())
 async def admin_ub_add_start(callback: CallbackQuery, state: FSMContext) -> None:
@@ -265,7 +276,6 @@ async def admin_ub_add_session(
 
     async with async_session_factory() as session_db:
         repo = UserbotRepository(session_db)
-
         existing = await repo.get_by_phone(data["phone"])
         if existing:
             await message.answer(
@@ -273,7 +283,6 @@ async def admin_ub_add_session(
                 "Удалите его сначала или используйте другой номер."
             )
             return
-
         userbot = await repo.create(
             phone=data["phone"],
             api_id=data["api_id"],
@@ -282,7 +291,6 @@ async def admin_ub_add_session(
         )
 
     ok = await pool.add_userbot(userbot.id)
-
     if ok:
         await message.answer(f"✅ Userbot #{userbot.id} добавлен и запущен!")
     else:
@@ -291,7 +299,212 @@ async def admin_ub_add_session(
             "Проверьте session_string."
         )
 
-# ── Статистика ────────────────────────────────────────────────────────────────
+
+# ── Источники музыки ───────────────────────────────────────────────────────────────────────────────
+
+@router.callback_query(F.data == "admin:sources", IsAdmin())
+async def admin_sources(callback: CallbackQuery) -> None:
+    from infrastructure.database.repositories.source_repo import SourceRepository
+    from infrastructure.database.session import async_session_factory
+
+    async with async_session_factory() as session:
+        repo = SourceRepository(session)
+        await repo.get_or_create_vk()
+        sources = await repo.get_all()
+
+    builder = InlineKeyboardBuilder()
+    for src in sources:
+        icon = "🟢" if src.enabled else "🔴"
+        action = "disable" if src.enabled else "enable"
+        builder.row(InlineKeyboardButton(
+            text=f"{icon} {src.name}  |  ⏱ {int(src.avg_response_ms)}ms  |  ✅{src.success_count} ❌{src.error_count}",
+            callback_data=f"admin:src:{action}:{src.id}",
+        ))
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="admin:back"))
+
+    text_lines = [" 📡 Источники музыки \n"]
+    for src in sources:
+        icon = "🟢" if src.enabled else "🔴"
+        text_lines.append(
+            f"{icon} <b>{src.name}</b> (@{src.bot_username})\n"
+            f"   Приоритет: {src.priority} | Таймаут: {src.timeout}с\n"
+            f"   Успешно: {src.success_count} | Ошибок: {src.error_count}\n"
+            f"   Ср. время: {int(src.avg_response_ms)} мс\n"
+        )
+    if not sources:
+        text_lines.append("Нет настроенных источников.")
+
+    await _safe_edit(callback, "\n".join(text_lines), reply_markup=builder.as_markup())
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:src:enable:"), IsAdmin())
+async def admin_src_enable(callback: CallbackQuery) -> None:
+    src_id = int(callback.data.split(":")[-1])
+    from infrastructure.database.repositories.source_repo import SourceRepository
+    from infrastructure.database.session import async_session_factory
+    async with async_session_factory() as session:
+        await SourceRepository(session).set_enabled(src_id, True)
+    await callback.answer("✅ Источник включён", show_alert=True)
+    await admin_sources(callback)
+
+
+@router.callback_query(F.data.startswith("admin:src:disable:"), IsAdmin())
+async def admin_src_disable(callback: CallbackQuery) -> None:
+    src_id = int(callback.data.split(":")[-1])
+    from infrastructure.database.repositories.source_repo import SourceRepository
+    from infrastructure.database.session import async_session_factory
+    async with async_session_factory() as session:
+        await SourceRepository(session).set_enabled(src_id, False)
+    await callback.answer("⛔ Источник отключён", show_alert=True)
+    await admin_sources(callback)
+
+
+# ── Пользователи ───────────────────────────────────────────────────────────────────────────────────
+
+_USERS_PAGE_SIZE = 10
+
+
+@router.callback_query(F.data == "admin:users", IsAdmin())
+async def admin_users(callback: CallbackQuery) -> None:
+    await _show_users_page(callback, page=0)
+
+
+@router.callback_query(F.data.startswith("admin:users:page:"), IsAdmin())
+async def admin_users_page(callback: CallbackQuery) -> None:
+    page = int(callback.data.split(":")[-1])
+    await _show_users_page(callback, page=page)
+
+
+async def _show_users_page(callback: CallbackQuery, page: int) -> None:
+    from infrastructure.database.repositories.user_repo import UserRepository
+    from infrastructure.database.session import async_session_factory
+    from sqlalchemy import select, func
+    from infrastructure.database.models import User
+
+    async with async_session_factory() as session:
+        offset = page * _USERS_PAGE_SIZE
+        count_res = await session.execute(select(func.count()).select_from(User))
+        total = count_res.scalar_one()
+        res = await session.execute(
+            select(User).order_by(User.created_at.desc()).offset(offset).limit(_USERS_PAGE_SIZE)
+        )
+        users = list(res.scalars().all())
+
+    builder = InlineKeyboardBuilder()
+    for u in users:
+        ban_icon = "🚫" if u.is_banned else "👤"
+        name = u.first_name or u.username or str(u.telegram_id)
+        builder.row(InlineKeyboardButton(
+            text=f"{ban_icon} {name[:20]} | req:{u.total_requests}",
+            callback_data=f"admin:user:{u.id}",
+        ))
+
+    pages = max(1, (total + _USERS_PAGE_SIZE - 1) // _USERS_PAGE_SIZE)
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"admin:users:page:{page - 1}"))
+    nav.append(InlineKeyboardButton(text=f"{page + 1}/{pages}", callback_data="noop"))
+    if (page + 1) < pages:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"admin:users:page:{page + 1}"))
+    if nav:
+        builder.row(*nav)
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="admin:back"))
+
+    await _safe_edit(
+        callback,
+        f" 👥 Пользователи (всего {total})\nСтраница {page + 1}/{pages}:",
+        reply_markup=builder.as_markup(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.func(_is_user_detail), IsAdmin())
+async def admin_user_detail(callback: CallbackQuery) -> None:
+    user_id = int(callback.data.split(":")[-1])
+    from infrastructure.database.repositories.user_repo import UserRepository
+    from infrastructure.database.session import async_session_factory
+
+    async with async_session_factory() as session:
+        user = await UserRepository(session).get_by_id(user_id)
+
+    if not user:
+        await callback.answer("❌ Пользователь не найден", show_alert=True)
+        return
+
+    name = user.first_name or user.username or "—"
+    username = f"@{user.username}" if user.username else "—"
+    status = "🚫 Заблокирован" if user.is_banned else "✅ Активен"
+    text = (
+        f" 👤 Пользователь #{user.id} \n\n"
+        f"Имя: {name}\n"
+        f"Username: {username}\n"
+        f"Telegram ID: <code>{user.telegram_id}</code>\n"
+        f"Язык: {user.language.value}\n"
+        f"Premium: {'✅' if user.premium else '❌'}\n"
+        f"Статус: {status}\n"
+        f"Запросов сегодня: {user.daily_requests}\n"
+        f"Запросов всего: {user.total_requests}\n"
+        f"Регистрация: {user.created_at.strftime('%d.%m.%Y %H:%M')}\n"
+    )
+    if user.is_banned and user.ban_reason:
+        text += f"Причина бана: {user.ban_reason}\n"
+
+    ban_btn = (
+        InlineKeyboardButton(text="✅ Разбанить", callback_data=f"admin:user:unban:{user_id}")
+        if user.is_banned
+        else InlineKeyboardButton(text="🚫 Забанить", callback_data=f"admin:user:ban:{user_id}")
+    )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [ban_btn],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="admin:users")],
+    ])
+    await _safe_edit(callback, text, reply_markup=keyboard)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:user:ban:"), IsAdmin())
+async def admin_user_ban(callback: CallbackQuery) -> None:
+    user_id = int(callback.data.split(":")[-1])
+    from infrastructure.database.repositories.user_repo import UserRepository
+    from infrastructure.database.session import async_session_factory
+    async with async_session_factory() as session:
+        await UserRepository(session).ban(user_id)
+    await callback.answer("🚫 Пользователь заблокирован", show_alert=True)
+    callback.data = f"admin:user:{user_id}"
+    await admin_user_detail(callback)
+
+
+@router.callback_query(F.data.startswith("admin:user:unban:"), IsAdmin())
+async def admin_user_unban(callback: CallbackQuery) -> None:
+    user_id = int(callback.data.split(":")[-1])
+    from infrastructure.database.repositories.user_repo import UserRepository
+    from infrastructure.database.session import async_session_factory
+    async with async_session_factory() as session:
+        await UserRepository(session).unban(user_id)
+    await callback.answer("✅ Пользователь разблокирован", show_alert=True)
+    callback.data = f"admin:user:{user_id}"
+    await admin_user_detail(callback)
+
+
+# ── Каналы ───────────────────────────────────────────────────────────────────────────────────
+
+@router.callback_query(F.data == "admin:channels", IsAdmin())
+async def admin_channels(callback: CallbackQuery) -> None:
+    await _safe_edit(
+        callback,
+        " 📢 Управление каналами \n\n"
+        "Каналы используются для публикации популярных треков.\n\n"
+        "Для подключения канала:\n"
+        "1. Добавьте бота в канал как администратора\n"
+        "2. Перешлите любое сообщение из канала сюда\n\n"
+        "⚙️ Функция подключения каналов в разработке.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=_BACK_BTN),
+    )
+    await callback.answer()
+
+
+# ── Статистика ───────────────────────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "admin:stats", IsAdmin())
 async def admin_stats(
@@ -301,11 +514,13 @@ async def admin_stats(
     cache: CacheManager,
 ) -> None:
     import psutil
+    from infrastructure.database.session import async_session_factory
+    from sqlalchemy import select, func
+    from infrastructure.database.models import User, Search
 
     pool_stats = pool.get_stats()
     queue_stats = queue.get_stats()
     redis_ok = await cache.ping()
-
     cpu = psutil.cpu_percent(interval=0.1)
     ram = psutil.virtual_memory()
 
@@ -313,6 +528,10 @@ async def admin_stats(
     popular_text = "\n".join(
         f" {i+1}. {q} ({int(c)})" for i, (q, c) in enumerate(popular)
     ) or " —"
+
+    async with async_session_factory() as session:
+        total_users = (await session.execute(select(func.count()).select_from(User))).scalar_one()
+        total_searches = (await session.execute(select(func.count()).select_from(Search))).scalar_one()
 
     await _safe_edit(
         callback,
@@ -326,93 +545,64 @@ async def admin_stats(
         " Очередь: \n"
         f" ⏳ В очереди: {queue_stats.get('queue_size', 0)}\n"
         f" ⚙️ Обрабатывается: {queue_stats.get('processing', 0)}\n\n"
+        " База данных: \n"
+        f" 👥 Пользователей: {total_users}\n"
+        f" 🔍 Поисков всего: {total_searches}\n\n"
         " Система: \n"
         f" 💻 CPU: {cpu}%\n"
         f" 🧠 RAM: {ram.percent}% ({ram.used // 1024 // 1024} MB)\n"
         f" 📦 Redis: {'✅' if redis_ok else '❌'}\n\n"
         " 🔥 Топ запросов: \n"
         f"{popular_text}",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(text="🔙 Назад", callback_data="admin:back"),
-                InlineKeyboardButton(text="🔄 Обновить", callback_data="admin:stats"),
-            ]
-        ]),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="🔙 Назад", callback_data="admin:back"),
+            InlineKeyboardButton(text="🔄 Обновить", callback_data="admin:stats"),
+        ]]),
     )
     await callback.answer()
 
-# ── Логи ──────────────────────────────────────────────────────────────────────
+
+# ── Логи ───────────────────────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "admin:logs", IsAdmin())
 async def admin_logs(callback: CallbackQuery) -> None:
-    import os
-    log_path = "bot.log"
-    text = " 📋 Последние логи \n\n"
-    if os.path.exists(log_path):
-        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()
-        last = "".join(lines[-30:]).strip()
-        # Telegram message limit is 4096 chars
-        if len(last) > 3500:
-            last = "..." + last[-3500:]
-        text += f"<pre>{last}</pre>" if last else "Файл пуст."
-    else:
-        text += "Файл логов не найден.\nУбедитесь что logging настроен на запись в bot.log"
+    if not os.path.exists(_LOG_PATH):
+        await _safe_edit(
+            callback,
+            f"📋 Файл логов не найден.\n"
+            f"Ожидаемый путь: <code>{_LOG_PATH}</code>\n\n"
+            f"Перезапустите бот — файл создастся автоматически.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=_BACK_BTN),
+        )
+        await callback.answer()
+        return
+
+    with open(_LOG_PATH, "r", encoding="utf-8", errors="replace") as f:
+        lines = f.readlines()
+
+    last = "".join(lines[-40:]).strip()
+    if len(last) > 3500:
+        last = "…" + last[-3500:]
 
     await _safe_edit(
         callback,
-        text,
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=_BACK_BTN),
+        f" 📋 Последние логи ({len(lines)} строк) \n\n<pre>{last}</pre>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="🔄 Обновить", callback_data="admin:logs"),
+            InlineKeyboardButton(text="🔙 Назад", callback_data="admin:back"),
+        ]]),
     )
     await callback.answer()
 
-# ── Источники (заглушка) ──────────────────────────────────────────────────────
 
-@router.callback_query(F.data == "admin:sources", IsAdmin())
-async def admin_sources(callback: CallbackQuery) -> None:
-    await _safe_edit(
-        callback,
-        " 📡 Источники музыки \n\n"
-        "Активные источники:\n"
-        "• VK Music — подключён\n\n"
-        "Управление источниками будет доступно в следующей версии.",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=_BACK_BTN),
-    )
-    await callback.answer()
-
-# ── Каналы (заглушка) ─────────────────────────────────────────────────────────
-
-@router.callback_query(F.data == "admin:channels", IsAdmin())
-async def admin_channels(callback: CallbackQuery) -> None:
-    await _safe_edit(
-        callback,
-        " 📢 Управление каналами \n\n"
-        "Эта функция находится в разработке.\n"
-        "Здесь будет управление каналами для рассылки результатов.",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=_BACK_BTN),
-    )
-    await callback.answer()
-
-# ── Пользователи (заглушка) ───────────────────────────────────────────────────
-
-@router.callback_query(F.data == "admin:users", IsAdmin())
-async def admin_users(callback: CallbackQuery) -> None:
-    await _safe_edit(
-        callback,
-        " 👥 Пользователи \n\n"
-        "Эта функция находится в разработке.\n"
-        "Здесь будет список пользователей бота и управление ими.",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=_BACK_BTN),
-    )
-    await callback.answer()
-
-# ── Рассылка ──────────────────────────────────────────────────────────────────
+# ── Рассылка ─────────────────────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "admin:broadcast", IsAdmin())
 async def admin_broadcast_start(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(BroadcastStates.waiting_text)
     await callback.message.answer(
-        "📣 Введите текст для рассылки всем пользователям.\n"
+        "📣 Введите текст рассылки.\n"
+        "Поддерживается HTML-форматирование.\n\n"
         "Для отмены отправьте /cancel"
     )
     await callback.answer()
@@ -421,10 +611,36 @@ async def admin_broadcast_start(callback: CallbackQuery, state: FSMContext) -> N
 @router.message(BroadcastStates.waiting_text, IsAdmin())
 async def admin_broadcast_send(message: Message, state: FSMContext) -> None:
     await state.clear()
-    # Placeholder — реальная рассылка требует таблицы users в БД
-    await message.answer(
-        "⚠️ Рассылка пока не реализована.\n"
-        "Для отправки нужно подключить таблицу пользователей."
+    text = message.text or message.caption or ""
+    if not text:
+        await message.answer("❌ Сообщение пустое.")
+        return
+
+    from infrastructure.database.session import async_session_factory
+    from sqlalchemy import select
+    from infrastructure.database.models import User
+
+    status_msg = await message.answer("⏳ Запускаю рассылку...")
+
+    async with async_session_factory() as session:
+        res = await session.execute(
+            select(User.telegram_id).where(User.is_banned == False)  # noqa: E712
+        )
+        user_ids = [row[0] for row in res.all()]
+
+    sent = 0
+    failed = 0
+    for tg_id in user_ids:
+        try:
+            await message.bot.send_message(tg_id, text)
+            sent += 1
+        except Exception:
+            failed += 1
+
+    await status_msg.edit_text(
+        f"📣 Рассылка завершена\n\n"
+        f"✅ Отправлено: {sent}\n"
+        f"❌ Не доставлено: {failed}"
     )
 
 
@@ -437,7 +653,8 @@ async def admin_cancel(message: Message, state: FSMContext) -> None:
     else:
         await message.answer("Нечего отменять.")
 
-# ── Назад ─────────────────────────────────────────────────────────────────────
+
+# ── Назад ───────────────────────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "admin:back", IsAdmin())
 async def admin_back(callback: CallbackQuery, pool: UserbotPool, queue: QueueManager) -> None:
