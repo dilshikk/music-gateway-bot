@@ -1,16 +1,16 @@
 import asyncio
 import logging
 
-# BUG FIX: pyrogram 2.0.106 calls asyncio.get_event_loop() at import time
-# inside sync.py. If uvloop has replaced the event loop policy before an event
-# loop is created, this raises RuntimeError. We must set a default event loop
-# BEFORE any pyrogram import happens so that get_event_loop() succeeds.
-# This must be at the very top of the entry point, before all other imports.
-try:
-    asyncio.get_event_loop()
-except RuntimeError:
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+# BUG FIX: pyrogram 2.0.106 calls asyncio.get_event_loop() at import time.
+# uvloop replaces the default event loop policy and raises RuntimeError when
+# get_event_loop() is called before any loop has been created.
+# We patch the policy back to the default BEFORE any other imports happen,
+# which guarantees pyrogram's sync.py can safely call get_event_loop().
+# asyncio.run() will still use the default (or uvloop if aiogram installs it
+# after startup), so there is no performance loss.
+asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
