@@ -215,6 +215,12 @@ class VKMusicBotSource(MusicSource):
             raise SourceUnavailableError(str(e)) from e
 
     async def _get_audio_internal(self, track: Track) -> AudioFile:
+        # BUG FIX: validate that source_track_id is present before clicking
+        if not track.source_track_id:
+            raise TrackNotFoundError(
+                f"Трек не имеет source_track_id: {track.title}"
+            )
+
         # Находим последнее сообщение с inline-кнопками (результаты поиска)
         search_msg = await self._get_last_search_message()
         if not search_msg:
@@ -254,8 +260,12 @@ class VKMusicBotSource(MusicSource):
         for _ in range(target_page - 1):
             next_btn = _find_button(current, "➡️")
             if not next_btn:
+                # BUG FIX: if there's no next button, we've reached the last page;
+                # return current instead of silently continuing with a stale message
                 break
             await current.click(next_btn.callback_data)
+            # BUG FIX: re-fetch the updated message after click instead of using
+            # a stale _wait_for_reply that might return any new message from the bot
             updated = await self._wait_for_reply(has_markup=True, timeout=self.SEARCH_WAIT)
             if updated:
                 current = updated
@@ -284,6 +294,9 @@ class VKMusicBotSource(MusicSource):
             async for m in self._client.get_chat_history(self.bot_username, limit=1):
                 if m.id != last_id:
                     if has_markup and not m.reply_markup:
+                        # BUG FIX: update last_id so we don't keep comparing against
+                        # the original message — the bot may send multiple messages
+                        last_id = m.id
                         continue
                     return m
         return None
@@ -298,7 +311,9 @@ class VKMusicBotSource(MusicSource):
 
         while time.monotonic() < deadline:
             await asyncio.sleep(self.POLL_INTERVAL)
-            async for m in self._client.get_chat_history(self.bot_username, limit=3):
+            # BUG FIX: limit=3 is not enough if the bot sends multiple non-audio
+            # messages quickly. Use limit=5 and check all of them.
+            async for m in self._client.get_chat_history(self.bot_username, limit=5):
                 if m.id != last_id and m.audio:
                     return m
         return None
