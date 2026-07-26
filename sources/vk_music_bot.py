@@ -1,3 +1,12 @@
+"""
+Источник музыки через @vkmusic_bot (Pyrogram userbot).
+
+BUG FIX (race condition):
+    Раньше last_id запоминался ПОСЛЕ send_message. Если @vkmusic_bot
+    успевал ответить раньше первого опроса, ответ уже был в истории —
+    его last_id становился «базовым», и новых сообщений не появлялось.
+    Теперь last_id фиксируется ДО отправки запроса.
+"""
 import asyncio
 import hashlib
 import re
@@ -102,27 +111,20 @@ class VKMusicBotSource(MusicSource):
     """
     Источник музыки через @vkmusic_bot.
 
-    Алгоритм поиска:
-      1. Userbot отправляет запрос боту
-      2. Ждём ответ с inline-кнопками
-      3. Сохраняем результаты
-
-    Алгоритм получения аудио:
-      1. Находим сообщение с кнопками
-      2. Нажимаем кнопку по callback_data (не по тексту!)
-      3. Ждём сообщение с аудио
-      4. Если передан target_chat_id — userbot копирует сообщение
-         напрямую пользователю (copy_message), возвращаем delivered=True.
-         Главный бот answer_audio при этом НЕ вызывает.
+    Доставка аудио:
+        Userbot получает аудио-сообщение от @vkmusic_bot, затем копирует его
+        напрямую в чат пользователя через copy_message (если передан
+        target_chat_id).  Главный бот answer_audio в этом случае НЕ вызывается,
+        т.к. file_id из Pyrogram-сессии невалиден для другой сессии/токена.
     """
 
     name = "VK Music Bot"
     bot_username = "vkmusic_bot"
     source_type = "telegram_bot"
 
-    SEARCH_WAIT   = 5.0
-    AUDIO_WAIT    = 10.0
-    POLL_INTERVAL = 0.5
+    SEARCH_WAIT   = 15.0   # увеличен с 5 → 15: сервер может быть медленным
+    AUDIO_WAIT    = 20.0   # увеличен с 10 → 20
+    POLL_INTERVAL = 0.3    # уменьшен с 0.5 → 0.3: реагируем быстрее
 
     def __init__(
         self,
@@ -153,9 +155,18 @@ class VKMusicBotSource(MusicSource):
             raise SourceUnavailableError(str(e)) from e
 
     async def _search_internal(self, query: str, page: int) -> SearchResult:
+        # BUG FIX: запоминаем last_id ДО отправки запроса.
+        # Если фиксировать после — @vkmusic_bot успевает ответить быстрее
+        # первого опроса, ответ уже в истории, и _wait_for_reply его пропускает.
+        last_id = await self._get_last_message_id()
+
         await self._client.send_message(self.bot_username, query)
 
-        msg = await self._wait_for_reply(has_markup=True, timeout=self.SEARCH_WAIT)
+        msg = await self._wait_for_new_reply(
+            after_id=last_id,
+            has_markup=True,
+            timeout=self.SEARCH_WAIT,
+        )
         if not msg:
             raise SourceTimeoutError(f"Нет ответа от {self.bot_username}")
 
@@ -181,18 +192,6 @@ class VKMusicBotSource(MusicSource):
         track: Track,
         target_chat_id: int | None = None,
     ) -> AudioFile:
-        """
-        Получает аудио и опционально доставляет его пользователю.
-
-        Если target_chat_id передан — userbot пересылает аудио напрямую
-        в чат пользователя через copy_message.  Возвращает AudioFile с
-        delivered=True; главный бот в этом случае НЕ должен вызывать
-        answer_audio (аудио уже доставлено).
-
-        BUG FIX: file_id из Pyrogram-сессии userbot'а не принимается
-        главным ботом (разные токены/сессии).  Единственный рабочий способ
-        без скачивания — userbot копирует сообщение напрямую адресату.
-        """
         start = time.monotonic()
         try:
             audio = await self._get_audio_internal(track, target_chat_id)
@@ -222,21 +221,24 @@ class VKMusicBotSource(MusicSource):
         if not search_msg:
             raise TrackNotFoundError("Не найдено сообщение с результатами поиска")
 
+        # BUG FIX: фиксируем last_id ДО нажатия кнопки (та же логика что и в поиске)
+        last_id = await self._get_last_message_id()
+
         clicked = await _click_by_callback_data(search_msg, track.source_track_id)
         if not clicked:
             raise TrackNotFoundError(
                 f"Кнопка с callback_data '{track.source_track_id}' не найдена"
             )
 
-        audio_msg = await self._wait_for_audio(timeout=self.AUDIO_WAIT)
+        audio_msg = await self._wait_for_new_audio(
+            after_id=last_id,
+            timeout=self.AUDIO_WAIT,
+        )
         if not audio_msg or not audio_msg.audio:
             raise TrackNotFoundError(f"Аудио не получено для трека: {track.title}")
 
         delivered = False
         if target_chat_id is not None:
-            # Userbot копирует сообщение напрямую в чат пользователя.
-            # Это единственный способ "переслать" аудио без скачивания,
-            # т.к. file_id из Pyrogram не валиден для другого бота/сессии.
             await self._client.copy_message(
                 chat_id=target_chat_id,
                 from_chat_id=audio_msg.chat.id,
@@ -271,50 +273,64 @@ class VKMusicBotSource(MusicSource):
             next_btn = _find_button_by_text(current, "➡️")
             if not next_btn:
                 break
+            last_id = await self._get_last_message_id()
             await _click_by_callback_data(current, next_btn.callback_data)
-            updated = await self._wait_for_reply(has_markup=True, timeout=self.SEARCH_WAIT)
+            updated = await self._wait_for_new_reply(
+                after_id=last_id,
+                has_markup=True,
+                timeout=self.SEARCH_WAIT,
+            )
             if updated:
                 current = updated
         return current
 
     # ── Вспомогательные методы ────────────────────────────────────────────────
 
-    async def _wait_for_reply(
-        self,
-        has_markup: bool = False,
-        timeout: float = 5.0,
-    ) -> Message | None:
-        deadline = time.monotonic() + timeout
-        last_id: int | None = None
-
+    async def _get_last_message_id(self) -> int:
+        """Возвращает ID последнего сообщения в диалоге с ботом."""
         async for m in self._client.get_chat_history(self.bot_username, limit=1):
-            last_id = m.id
+            return m.id
+        return 0
 
+    async def _wait_for_new_reply(
+        self,
+        after_id: int,
+        has_markup: bool = False,
+        timeout: float = 15.0,
+    ) -> Message | None:
+        """
+        Ждёт сообщение с ID > after_id.
+        after_id должен быть зафиксирован ДО действия (send_message / click).
+        """
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             await asyncio.sleep(self.POLL_INTERVAL)
-            async for m in self._client.get_chat_history(self.bot_username, limit=1):
-                if m.id != last_id:
-                    if has_markup and not m.reply_markup:
-                        last_id = m.id
-                        continue
-                    return m
+            async for m in self._client.get_chat_history(self.bot_username, limit=3):
+                if m.id <= after_id:
+                    break  # история отсортирована по убыванию — дальше старые
+                if has_markup and not m.reply_markup:
+                    continue
+                return m
         return None
 
-    async def _wait_for_audio(self, timeout: float = 10.0) -> Message | None:
+    async def _wait_for_new_audio(
+        self,
+        after_id: int,
+        timeout: float = 20.0,
+    ) -> Message | None:
+        """Ждёт аудио-сообщение с ID > after_id."""
         deadline = time.monotonic() + timeout
-        last_id: int | None = None
-
-        async for m in self._client.get_chat_history(self.bot_username, limit=1):
-            last_id = m.id
-
         while time.monotonic() < deadline:
             await asyncio.sleep(self.POLL_INTERVAL)
             async for m in self._client.get_chat_history(self.bot_username, limit=5):
-                if m.id != last_id and m.audio:
+                if m.id <= after_id:
+                    break
+                if m.audio:
                     return m
         return None
 
     async def _get_last_search_message(self) -> Message | None:
+        """Последнее сообщение с inline-кнопками (результаты поиска)."""
         async for m in self._client.get_chat_history(self.bot_username, limit=5):
             if m.reply_markup:
                 return m
@@ -326,7 +342,7 @@ class VKMusicBotSource(MusicSource):
 async def _click_by_callback_data(msg: Message, callback_data: str) -> bool:
     """
     Нажимает кнопку по значению callback_data (не по тексту).
-    Pyrogram.Message.click() по умолчанию ищет по тексту — это неверно
+    Pyrogram.Message.click() по умолчанию ищет по тексту — это не работает
     для кнопок вида 'a:5192961137011854851:1'.
     """
     if not msg.reply_markup:
@@ -336,10 +352,8 @@ async def _click_by_callback_data(msg: Message, callback_data: str) -> bool:
         for col_idx, btn in enumerate(row):
             if btn.callback_data == callback_data:
                 try:
-                    # Pyrogram >= 2.x: click() принимает координаты (row, col)
                     await msg.click(row_idx, col_idx)
                 except TypeError:
-                    # Старые версии Pyrogram — click(x, y) недоступен, пробуем текст
                     await msg.click(btn.text)
                 return True
 
