@@ -85,6 +85,11 @@ class Settings(BaseSettings):
     # Logging
     LOG_LEVEL: str = "INFO"
 
+    # Relay group — служебная группа куда userbot пересылает аудио
+    # Создать группу, добавить бота (admin) и userbot, вписать ID сюда.
+    # Пример: LOG_GROUP_ID=-1001234567890
+    LOG_GROUP_ID: int = 0
+
     @property
     def log_level_int(self) -> int:
         return getattr(logging, self.LOG_LEVEL.upper(), logging.INFO)
