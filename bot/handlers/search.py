@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from collections.abc import Callable
 
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, Message
@@ -14,8 +15,8 @@ from core.search_manager import SearchContext, SearchManager
 from infrastructure.database.models import User
 from sources.base import SearchResult, Track
 
-logger  = logging.getLogger(__name__)
-router  = Router(name="search")
+logger = logging.getLogger(__name__)
+router = Router(name="search")
 
 # task_id → SearchResult (для пагинации и скачивания)
 _results_cache: dict[str, SearchResult] = {}
@@ -26,29 +27,24 @@ async def handle_search_query(
     message: Message,
     user: User,
     queue: QueueManager,
+    _: Callable,
 ) -> None:
     query = message.text.strip()
     if not query or len(query) < 2:
-        await message.answer("✏️ Введите название трека (минимум 2 символа).")
+        await message.answer(_("search-too-short"))
         return
 
-    # Сообщение о постановке в очередь
-    wait_msg = await message.answer("🔍 Ищу...")
+    wait_msg = await message.answer(_("search-processing"))
 
-    ctx = SearchContext(
-        query=query,
-        user_id=user.id,
-        page=1,
-    )
+    ctx = SearchContext(query=query, user_id=user.id, page=1)
 
     try:
-        task   = await queue.enqueue(ctx, is_premium=user.premium)
-        pos    = queue.get_position(task.task_id)
+        task = await queue.enqueue(ctx, is_premium=user.premium)
+        pos = queue.get_position(task.task_id)
 
         if pos and pos > 1:
             await wait_msg.edit_text(
-                f"⏳ Вы в очереди: <b>#{pos}</b>\n"
-                f"Запрос: <code>{query}</code>"
+                _("search-queue-position", position=pos, query=query)
             )
 
         result = await queue.wait_for_result(task)
@@ -57,33 +53,25 @@ async def handle_search_query(
         await wait_msg.edit_text(f"⏳ {e}")
         return
     except asyncio.TimeoutError:
-        await wait_msg.edit_text(
-            "⏰ Время ожидания истекло. Попробуйте ещё раз."
-        )
+        await wait_msg.edit_text(_("search-timeout"))
         return
-    except OverflowError as e:
-        await wait_msg.edit_text(f"🔴 {e}")
+    except OverflowError:
+        await wait_msg.edit_text(_("search-queue-full"))
         return
     except Exception as e:
         logger.error("Ошибка поиска для %d: %s", user.telegram_id, e)
-        await wait_msg.edit_text(
-            "❌ Произошла ошибка при поиске. Попробуйте позже."
-        )
+        await wait_msg.edit_text(_("search-error"))
         return
 
     if not result.tracks:
-        await wait_msg.edit_text(
-            f"😔 По запросу <code>{query}</code> ничего не найдено."
-        )
+        await wait_msg.edit_text(_("search-not-found", query=query))
         return
 
-    # Сохраняем результат для пагинации и скачивания
     _results_cache[task.task_id] = result
 
     keyboard = build_search_results_keyboard(result, task.task_id)
     await wait_msg.edit_text(
-        f"🎵 <b>Результаты:</b> <code>{query}</code>\n"
-        f"Найдено: {result.total} треков",
+        _("search-results-header", query=query, total=result.total),
         reply_markup=keyboard,
     )
 
@@ -94,20 +82,19 @@ async def handle_download(
     user: User,
     search_manager: SearchManager,
     cache: CacheManager,
+    _: Callable,
 ) -> None:
     _, task_id, track_idx_str = callback.data.split(":", 2)
     track_idx = int(track_idx_str)
 
     result = _results_cache.get(task_id)
     if not result or track_idx >= len(result.tracks):
-        await callback.answer("❌ Результаты устарели. Повторите поиск.", show_alert=True)
+        await callback.answer(_("download-results-stale"), show_alert=True)
         return
 
     track = result.tracks[track_idx]
 
-    await callback.message.edit_reply_markup(
-        reply_markup=build_downloading_keyboard()
-    )
+    await callback.message.edit_reply_markup(reply_markup=build_downloading_keyboard())
     await callback.answer()
 
     try:
@@ -118,14 +105,12 @@ async def handle_download(
             title=audio.title,
             performer=audio.artist,
             duration=audio.duration,
-            caption=f"🎵 {audio.artist} — {audio.title}",
+            caption=_("download-caption", artist=audio.artist, title=audio.title),
         )
 
-        # Восстанавливаем клавиатуру
         keyboard = build_search_results_keyboard(result, task_id)
         await callback.message.edit_reply_markup(reply_markup=keyboard)
 
-        # Обновляем счётчик запросов
         from infrastructure.database.repositories.user_repo import UserRepository
         from infrastructure.database.session import async_session_factory
         async with async_session_factory() as session:
@@ -135,7 +120,7 @@ async def handle_download(
         logger.error("Ошибка скачивания трека: %s", e)
         keyboard = build_search_results_keyboard(result, task_id)
         await callback.message.edit_reply_markup(reply_markup=keyboard)
-        await callback.answer("❌ Не удалось получить трек. Попробуйте другой.", show_alert=True)
+        await callback.answer(_("download-error"), show_alert=True)
 
 
 @router.callback_query(F.data.startswith("page:"))
@@ -143,25 +128,22 @@ async def handle_pagination(
     callback: CallbackQuery,
     user: User,
     queue: QueueManager,
+    _: Callable,
 ) -> None:
     _, task_id, page_str = callback.data.split(":", 2)
     page = int(page_str)
 
     old_result = _results_cache.get(task_id)
     if not old_result:
-        await callback.answer("❌ Результаты устарели.", show_alert=True)
+        await callback.answer(_("download-results-stale"), show_alert=True)
         return
 
-    await callback.answer("⏳ Загружаю страницу...")
+    await callback.answer(_("search-processing"))
 
-    ctx = SearchContext(
-        query=old_result.query,
-        user_id=user.id,
-        page=page,
-    )
+    ctx = SearchContext(query=old_result.query, user_id=user.id, page=page)
 
     try:
-        task   = await queue.enqueue(ctx, is_premium=user.premium)
+        task = await queue.enqueue(ctx, is_premium=user.premium)
         result = await queue.wait_for_result(task)
         _results_cache[task_id] = result
 
@@ -170,7 +152,7 @@ async def handle_pagination(
 
     except Exception as e:
         logger.error("Ошибка пагинации: %s", e)
-        await callback.answer("❌ Ошибка загрузки страницы.", show_alert=True)
+        await callback.answer(_("search-error"), show_alert=True)
 
 
 @router.callback_query(F.data == "close")
