@@ -31,6 +31,12 @@ async def _safe_edit(callback: CallbackQuery, text: str, reply_markup=None) -> N
             raise
 
 
+def _is_ub_detail(data: str) -> bool:
+    """True only for 'admin:ub:{int}' — exactly 3 colon-separated parts."""
+    parts = data.split(":")
+    return len(parts) == 3 and parts[2].isdigit()
+
+
 # ── FSM States ────────────────────────────────────────────────────────────────
 
 class AddUserbotStates(StatesGroup):
@@ -111,7 +117,11 @@ async def admin_userbots(callback: CallbackQuery, pool: UserbotPool) -> None:
     )
     await callback.answer()
 
-@router.callback_query(F.data.startswith("admin:ub:") & ~F.data.contains("add"), IsAdmin())
+
+# BUG FIX: previous filter F.data.startswith("admin:ub:") & ~F.data.contains("add")
+# was intercepting ALL sub-actions (enable/disable/restart/delete) before their
+# specific handlers could fire. Now we match only exact "admin:ub:{int}" (3 parts).
+@router.callback_query(F.data.func(_is_ub_detail), IsAdmin())
 async def admin_userbot_detail(
     callback: CallbackQuery,
     pool: UserbotPool,
@@ -151,17 +161,20 @@ async def admin_userbot_detail(
     await _safe_edit(callback, text, reply_markup=keyboard)
     await callback.answer()
 
+
 @router.callback_query(F.data.startswith("admin:ub:enable:"), IsAdmin())
 async def admin_ub_enable(callback: CallbackQuery, pool: UserbotPool) -> None:
     ub_id = int(callback.data.split(":")[-1])
     await pool.enable_userbot(ub_id)
     await callback.answer(f"✅ Userbot #{ub_id} включён", show_alert=True)
 
+
 @router.callback_query(F.data.startswith("admin:ub:disable:"), IsAdmin())
 async def admin_ub_disable(callback: CallbackQuery, pool: UserbotPool) -> None:
     ub_id = int(callback.data.split(":")[-1])
     await pool.disable_userbot(ub_id)
     await callback.answer(f"⛔ Userbot #{ub_id} выключен", show_alert=True)
+
 
 @router.callback_query(F.data.startswith("admin:ub:restart:"), IsAdmin())
 async def admin_ub_restart(callback: CallbackQuery, pool: UserbotPool) -> None:
@@ -171,6 +184,35 @@ async def admin_ub_restart(callback: CallbackQuery, pool: UserbotPool) -> None:
     status = "✅ Перезапущен" if ok else "❌ Ошибка перезапуска"
     await callback.message.answer(f"{status}: Userbot #{ub_id}")
 
+
+@router.callback_query(F.data.startswith("admin:ub:delete:"), IsAdmin())
+async def admin_ub_delete(callback: CallbackQuery, pool: UserbotPool) -> None:
+    ub_id = int(callback.data.split(":")[-1])
+    await pool.remove_userbot(ub_id)
+    await callback.answer(f"🗑 Userbot #{ub_id} удалён", show_alert=True)
+    # Вернуть список userbots
+    entries = pool.list_userbots()
+    builder = InlineKeyboardBuilder()
+    for entry in entries:
+        status_icon = {
+            "idle": "🟢", "busy": "🟡", "flood_wait": "🔴",
+            "error": "❌", "disabled": "⚫", "offline": "🔘",
+        }.get(entry.model.status.value, "❓")
+        builder.row(InlineKeyboardButton(
+            text=f"{status_icon} #{entry.id} {entry.model.phone}",
+            callback_data=f"admin:ub:{entry.id}",
+        ))
+    builder.row(
+        InlineKeyboardButton(text="➕ Добавить", callback_data="admin:ub:add"),
+        InlineKeyboardButton(text="🔙 Назад", callback_data="admin:back"),
+    )
+    await _safe_edit(
+        callback,
+        f" 🤖 Userbot'ы ({len(entries)} шт.)\n\nВыберите для управления:",
+        reply_markup=builder.as_markup(),
+    )
+
+
 # ── Добавление Userbot через FSM ──────────────────────────────────────────────
 
 @router.callback_query(F.data == "admin:ub:add", IsAdmin())
@@ -179,11 +221,13 @@ async def admin_ub_add_start(callback: CallbackQuery, state: FSMContext) -> None
     await callback.message.answer("📱 Введите номер телефона (формат: +79991234567):")
     await callback.answer()
 
+
 @router.message(AddUserbotStates.waiting_phone, IsAdmin())
 async def admin_ub_add_phone(message: Message, state: FSMContext) -> None:
     await state.update_data(phone=message.text.strip())
     await state.set_state(AddUserbotStates.waiting_api_id)
     await message.answer("🔑 Введите api_id (число):")
+
 
 @router.message(AddUserbotStates.waiting_api_id, IsAdmin())
 async def admin_ub_add_api_id(message: Message, state: FSMContext) -> None:
@@ -193,6 +237,7 @@ async def admin_ub_add_api_id(message: Message, state: FSMContext) -> None:
     await state.update_data(api_id=int(message.text.strip()))
     await state.set_state(AddUserbotStates.waiting_api_hash)
     await message.answer("🔑 Введите api_hash:")
+
 
 @router.message(AddUserbotStates.waiting_api_hash, IsAdmin())
 async def admin_ub_add_api_hash(message: Message, state: FSMContext) -> None:
@@ -211,11 +256,11 @@ async def admin_ub_add_api_hash(message: Message, state: FSMContext) -> None:
         "\"</code>"
     )
 
+
 @router.message(AddUserbotStates.waiting_session, IsAdmin())
 async def admin_ub_add_session(
     message: Message,
     state: FSMContext,
-    # BUG FIX: inject via aiogram DI from dp["pool"], NOT message.bot.get()
     pool: UserbotPool,
 ) -> None:
     data = await state.get_data()
@@ -295,6 +340,7 @@ async def admin_stats(
         ]]),
     )
     await callback.answer()
+
 
 @router.callback_query(F.data == "admin:back", IsAdmin())
 async def admin_back(callback: CallbackQuery, pool: UserbotPool, queue: QueueManager) -> None:
