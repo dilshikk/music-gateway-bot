@@ -26,7 +26,7 @@ apscheduler==3.10.4
 aiohttp==3.11.10
 
 # Мониторинг
-psutil==6.1.0
+psutil==7.2.2
 
 # i18n
 fluent.runtime==0.4.0
