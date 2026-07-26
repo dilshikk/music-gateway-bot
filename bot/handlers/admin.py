@@ -21,6 +21,8 @@ from core.userbot_pool import UserbotPool
 logger = logging.getLogger(__name__)
 router = Router(name="admin")
 
+_BACK_BTN = [[InlineKeyboardButton(text="🔙 Назад", callback_data="admin:back")]]
+
 
 async def _safe_edit(callback: CallbackQuery, text: str, reply_markup=None) -> None:
     """Edit message, ignoring 'message is not modified' errors on double-tap."""
@@ -45,8 +47,10 @@ class AddUserbotStates(StatesGroup):
     waiting_api_hash = State()
     waiting_session = State()
 
+
 class BroadcastStates(StatesGroup):
     waiting_text = State()
+
 
 # ── Главное меню админа ───────────────────────────────────────────────────────
 
@@ -118,9 +122,6 @@ async def admin_userbots(callback: CallbackQuery, pool: UserbotPool) -> None:
     await callback.answer()
 
 
-# BUG FIX: previous filter F.data.startswith("admin:ub:") & ~F.data.contains("add")
-# was intercepting ALL sub-actions (enable/disable/restart/delete) before their
-# specific handlers could fire. Now we match only exact "admin:ub:{int}" (3 parts).
 @router.callback_query(F.data.func(_is_ub_detail), IsAdmin())
 async def admin_userbot_detail(
     callback: CallbackQuery,
@@ -265,7 +266,6 @@ async def admin_ub_add_session(
     async with async_session_factory() as session_db:
         repo = UserbotRepository(session_db)
 
-        # BUG FIX: check for duplicate phone before INSERT to avoid IntegrityError
         existing = await repo.get_by_phone(data["phone"])
         if existing:
             await message.answer(
@@ -332,13 +332,112 @@ async def admin_stats(
         f" 📦 Redis: {'✅' if redis_ok else '❌'}\n\n"
         " 🔥 Топ запросов: \n"
         f"{popular_text}",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="🔙 Назад", callback_data="admin:back"),
-            InlineKeyboardButton(text="🔄 Обновить", callback_data="admin:stats"),
-        ]]),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🔙 Назад", callback_data="admin:back"),
+                InlineKeyboardButton(text="🔄 Обновить", callback_data="admin:stats"),
+            ]
+        ]),
     )
     await callback.answer()
 
+# ── Логи ──────────────────────────────────────────────────────────────────────
+
+@router.callback_query(F.data == "admin:logs", IsAdmin())
+async def admin_logs(callback: CallbackQuery) -> None:
+    import os
+    log_path = "bot.log"
+    text = " 📋 Последние логи \n\n"
+    if os.path.exists(log_path):
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+        last = "".join(lines[-30:]).strip()
+        # Telegram message limit is 4096 chars
+        if len(last) > 3500:
+            last = "..." + last[-3500:]
+        text += f"<pre>{last}</pre>" if last else "Файл пуст."
+    else:
+        text += "Файл логов не найден.\nУбедитесь что logging настроен на запись в bot.log"
+
+    await _safe_edit(
+        callback,
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=_BACK_BTN),
+    )
+    await callback.answer()
+
+# ── Источники (заглушка) ──────────────────────────────────────────────────────
+
+@router.callback_query(F.data == "admin:sources", IsAdmin())
+async def admin_sources(callback: CallbackQuery) -> None:
+    await _safe_edit(
+        callback,
+        " 📡 Источники музыки \n\n"
+        "Активные источники:\n"
+        "• VK Music — подключён\n\n"
+        "Управление источниками будет доступно в следующей версии.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=_BACK_BTN),
+    )
+    await callback.answer()
+
+# ── Каналы (заглушка) ─────────────────────────────────────────────────────────
+
+@router.callback_query(F.data == "admin:channels", IsAdmin())
+async def admin_channels(callback: CallbackQuery) -> None:
+    await _safe_edit(
+        callback,
+        " 📢 Управление каналами \n\n"
+        "Эта функция находится в разработке.\n"
+        "Здесь будет управление каналами для рассылки результатов.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=_BACK_BTN),
+    )
+    await callback.answer()
+
+# ── Пользователи (заглушка) ───────────────────────────────────────────────────
+
+@router.callback_query(F.data == "admin:users", IsAdmin())
+async def admin_users(callback: CallbackQuery) -> None:
+    await _safe_edit(
+        callback,
+        " 👥 Пользователи \n\n"
+        "Эта функция находится в разработке.\n"
+        "Здесь будет список пользователей бота и управление ими.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=_BACK_BTN),
+    )
+    await callback.answer()
+
+# ── Рассылка ──────────────────────────────────────────────────────────────────
+
+@router.callback_query(F.data == "admin:broadcast", IsAdmin())
+async def admin_broadcast_start(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(BroadcastStates.waiting_text)
+    await callback.message.answer(
+        "📣 Введите текст для рассылки всем пользователям.\n"
+        "Для отмены отправьте /cancel"
+    )
+    await callback.answer()
+
+
+@router.message(BroadcastStates.waiting_text, IsAdmin())
+async def admin_broadcast_send(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    # Placeholder — реальная рассылка требует таблицы users в БД
+    await message.answer(
+        "⚠️ Рассылка пока не реализована.\n"
+        "Для отправки нужно подключить таблицу пользователей."
+    )
+
+
+@router.message(Command("cancel"), IsAdmin())
+async def admin_cancel(message: Message, state: FSMContext) -> None:
+    current = await state.get_state()
+    if current:
+        await state.clear()
+        await message.answer("❌ Отменено.")
+    else:
+        await message.answer("Нечего отменять.")
+
+# ── Назад ─────────────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "admin:back", IsAdmin())
 async def admin_back(callback: CallbackQuery, pool: UserbotPool, queue: QueueManager) -> None:
