@@ -3,6 +3,8 @@ import logging
 from collections.abc import Callable
 
 from aiogram import F, Router
+from aiogram.filters import StateFilter
+from aiogram.fsm.state import default_state
 from aiogram.types import CallbackQuery, Message
 
 from bot.keyboards.search import (
@@ -22,7 +24,11 @@ router = Router(name="search")
 _results_cache: dict[str, SearchResult] = {}
 
 
-@router.message(F.text & ~F.text.startswith("/"))
+# BUG FIX: StateFilter(default_state) ensures this catch-all handler fires ONLY
+# when the user is NOT inside an FSM flow (e.g. AddUserbotStates).
+# Without this filter the handler intercepts phone numbers, api_id, api_hash and
+# session strings that the admin FSM is waiting for.
+@router.message(StateFilter(default_state), F.text & ~F.text.startswith("/"))
 async def handle_search_query(
     message: Message,
     user: User,
