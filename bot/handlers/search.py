@@ -82,16 +82,15 @@ async def handle_download(
     user: User,
     search_manager: SearchManager,
     cache: CacheManager,
-    translate: Callable,  # Не используем '_', т.к. она перезаписывается split()-распаковкой ниже
+    _: Callable,  # Имя обязательно '_' — aiogram инжектирует переводчик именно так
 ) -> None:
-    # BUG FIX: раньше было `_, task_id, ...` — шаблон перезаписывал параметр-переводчик `_`
-    # строкой 'dl', поэтому дальше `_('download-error')` бросал TypeError.
-    _prefix, task_id, track_idx_str = callback.data.split(":", 2)
+    # BUG FIX: распаковываем в _dl_prefix, чтобы не перезаписывать параметр-переводчик '_'
+    _dl_prefix, task_id, track_idx_str = callback.data.split(":", 2)
     track_idx = int(track_idx_str)
 
     result = _results_cache.get(task_id)
     if not result or track_idx >= len(result.tracks):
-        await callback.answer(translate("download-results-stale"), show_alert=True)
+        await callback.answer(_("download-results-stale"), show_alert=True)
         return
 
     track = result.tracks[track_idx]
@@ -119,7 +118,7 @@ async def handle_download(
                 title=audio.title,
                 performer=audio.artist,
                 duration=audio.duration,
-                caption=translate("download-caption", artist=audio.artist, title=audio.title),
+                caption=_("download-caption", artist=audio.artist, title=audio.title),
             )
         else:
             logger.info(
@@ -140,7 +139,7 @@ async def handle_download(
         logger.error("Ошибка скачивания трека: %s", e)
         keyboard = build_search_results_keyboard(result, task_id)
         await callback.message.edit_reply_markup(reply_markup=keyboard)
-        await callback.answer(translate("download-error"), show_alert=True)
+        await callback.answer(_("download-error"), show_alert=True)
 
 
 @router.callback_query(F.data.startswith("page:"))
@@ -150,7 +149,7 @@ async def handle_pagination(
     queue: QueueManager,
     _: Callable,
 ) -> None:
-    _prefix, task_id, page_str = callback.data.split(":", 2)
+    _page_prefix, task_id, page_str = callback.data.split(":", 2)
     page = int(page_str)
 
     old_result = _results_cache.get(task_id)
