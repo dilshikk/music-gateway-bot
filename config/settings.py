@@ -2,6 +2,9 @@
 Конфигурация приложения через pydantic-settings.
 Читает переменные из .env файла.
 """
+import logging
+from typing import Annotated
+
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -16,7 +19,10 @@ class Settings(BaseSettings):
 
     # Telegram Bot
     BOT_TOKEN: str
-    # Поддерживает форматы: 123, [123,456], "123,456"
+    # Поддерживает оба формата в .env:
+    #   ADMIN_IDS=123456789
+    #   ADMIN_IDS=[123456789,987654321]
+    #   ADMIN_IDS=123456789,987654321
     ADMIN_IDS: list[int] = Field(default_factory=list)
 
     @field_validator("ADMIN_IDS", mode="before")
@@ -40,11 +46,6 @@ class Settings(BaseSettings):
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
 
-    # Псевдоним для обратной совместимости с кодом, который использует settings.redis_url
-    @property
-    def redis_url(self) -> str:
-        return self.REDIS_URL
-
     # Pyrogram
     PYROGRAM_API_ID: int = 0
     PYROGRAM_API_HASH: str = ""
@@ -55,9 +56,9 @@ class Settings(BaseSettings):
     API_HOST: str = "0.0.0.0"
     API_PORT: int = 8000
 
-    # Cache TTL
+    # Cache TTL (seconds)
     CACHE_SEARCH_TTL: int = 3600
-    CACHE_AUDIO_TTL: int = 86400
+    CACHE_AUDIO_TTL: int = 86400   # also used as CACHE_FILE_TTL
     CACHE_POPULAR_TTL: int = 86400
 
     # Rate limiting
@@ -77,12 +78,21 @@ class Settings(BaseSettings):
     INLINE_TIMEOUT: float = 8.0
     INLINE_RATE_LIMIT: int = 30
 
-    # Logging
-    LOG_LEVEL: str = "INFO"
-
     # Environment
     ENVIRONMENT: str = "production"
     DEBUG: bool = False
+
+    # Logging
+    # BUG FIX: LOG_LEVEL was used in main.py but missing from Settings.
+    LOG_LEVEL: str = "INFO"
+
+    @property
+    def log_level_int(self) -> int:
+        return getattr(logging, self.LOG_LEVEL.upper(), logging.INFO)
+
+    @property
+    def redis_url(self) -> str:
+        return self.REDIS_URL
 
 
 settings = Settings()
