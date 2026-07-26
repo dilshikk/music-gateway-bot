@@ -20,7 +20,7 @@ fastapi==0.115.5
 # что падает если uvloop перехватил политику event loop до asyncio.run().
 uvicorn==0.32.1
 # aiogram 3.13.0 требует pydantic>=2.4.1,<2.9
-pydantic==2.8.2
+pydantic==2.13.4
 pydantic-settings==2.4.0
 
 # Планировщик
