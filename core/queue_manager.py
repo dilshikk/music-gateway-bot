@@ -36,11 +36,15 @@ class SearchTask:
     audio:       AudioFile | None = None
     error:       str | None = None
 
-    # Future для ожидания результата
-    _future: asyncio.Future = field(
-        default_factory=lambda: asyncio.get_event_loop().create_future(),
-        repr=False,
-    )
+    # BUG FIX: asyncio.get_event_loop() is deprecated in Python 3.10+ when there is
+    # no running event loop. Use asyncio.get_running_loop() inside an async context,
+    # or initialise the Future lazily via a property to avoid the DeprecationWarning
+    # and potential RuntimeError in newer Python versions.
+    _future: asyncio.Future = field(default=None, repr=False)  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self._future is None:
+            self._future = asyncio.get_running_loop().create_future()
 
     def resolve(self, result: SearchResult) -> None:
         self.result = result
