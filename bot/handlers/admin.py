@@ -21,7 +21,7 @@ from core.userbot_pool import UserbotPool
 logger = logging.getLogger(__name__)
 router = Router(name="admin")
 
-_BACK_BTN = [[InlineKeyboardButton(text="🔙 Назад", callback_data="admin:back")]]
+_BACK_BTN = [[InlineKeyboardButton(text="Назад", callback_data="admin:back")]]
 
 
 async def _safe_edit(callback: CallbackQuery, text: str, reply_markup=None) -> None:
@@ -61,29 +61,34 @@ async def cmd_admin(message: Message, pool: UserbotPool, queue: QueueManager) ->
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="🤖 Userbot'ы", callback_data="admin:userbots"),
-            InlineKeyboardButton(text="📡 Источники", callback_data="admin:sources"),
+            InlineKeyboardButton(text="[U] Userbots", callback_data="admin:userbots"),
+            InlineKeyboardButton(text="[S] Istochniki", callback_data="admin:sources"),
         ],
         [
-            InlineKeyboardButton(text="📢 Каналы", callback_data="admin:channels"),
-            InlineKeyboardButton(text="👥 Пользов.", callback_data="admin:users"),
+            InlineKeyboardButton(text="[C] Kanaly", callback_data="admin:channels"),
+            InlineKeyboardButton(text="[P] Polzovateli", callback_data="admin:users"),
         ],
         [
-            InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats"),
-            InlineKeyboardButton(text="📋 Логи", callback_data="admin:logs"),
+            InlineKeyboardButton(text="[Q] Statistika", callback_data="admin:stats"),
+            InlineKeyboardButton(text="[L] Logi", callback_data="admin:logs"),
         ],
         [
-            InlineKeyboardButton(text="📣 Рассылка", callback_data="admin:broadcast"),
+            InlineKeyboardButton(text="[B] Rassylka", callback_data="admin:broadcast"),
         ],
     ])
 
     await message.answer(
-        " 🛠 Панель администратора \n\n"
-        f"🤖 Userbot: {pool_stats['idle']} свободных / "
-        f" {pool_stats['total']} всего\n"
-        f"⏳ Очередь: {queue_stats.get('queue_size', 0)} запросов\n"
-        f"🔴 FloodWait: {pool_stats['flood']} \n"
-        f"❌ Ошибок: {pool_stats['error']} ",
+        "=== Admin Panel ===\n\n"
+        "Userbots: {idle} svobodnyh / {total} vsego\n"
+        "Ochered: {queue_size} zaprosov\n"
+        "FloodWait: {flood}\n"
+        "Oshibok: {error}".format(
+            idle=pool_stats["idle"],
+            total=pool_stats["total"],
+            queue_size=queue_stats.get("queue_size", 0),
+            flood=pool_stats["flood"],
+            error=pool_stats["error"],
+        ),
         reply_markup=keyboard,
     )
 
@@ -94,29 +99,34 @@ async def admin_userbots(callback: CallbackQuery, pool: UserbotPool) -> None:
     entries = pool.list_userbots()
     builder = InlineKeyboardBuilder()
 
-    for entry in entries:
-        status_icon = {
-            "idle": "🟢",
-            "busy": "🟡",
-            "flood_wait": "🔴",
-            "error": "❌",
-            "disabled": "⚫",
-            "offline": "🔘",
-        }.get(entry.model.status.value, "❓")
+    STATUS_LABELS = {
+        "idle":       "[OK]",
+        "busy":       "[..]",
+        "flood_wait": "[FW]",
+        "error":      "[ER]",
+        "disabled":   "[--]",
+        "offline":    "[OF]",
+    }
 
+    for entry in entries:
+        label = STATUS_LABELS.get(entry.model.status.value, "[?]")
         builder.row(InlineKeyboardButton(
-            text=f"{status_icon} #{entry.id} {entry.model.phone}",
-            callback_data=f"admin:ub:{entry.id}",
+            text="{label} #{eid} {phone}".format(
+                label=label, eid=entry.id, phone=entry.model.phone
+            ),
+            callback_data="admin:ub:{id}".format(id=entry.id),
         ))
 
     builder.row(
-        InlineKeyboardButton(text="➕ Добавить", callback_data="admin:ub:add"),
-        InlineKeyboardButton(text="🔙 Назад", callback_data="admin:back"),
+        InlineKeyboardButton(text="[+] Dobavit", callback_data="admin:ub:add"),
+        InlineKeyboardButton(text="<< Nazad", callback_data="admin:back"),
     )
 
     await _safe_edit(
         callback,
-        f" 🤖 Userbot'ы ({len(entries)} шт.)\n\nВыберите для управления:",
+        "=== Userbots ({count} sht.) ===\n\nVyberite dlya upravleniya:".format(
+            count=len(entries)
+        ),
         reply_markup=builder.as_markup(),
     )
     await callback.answer()
@@ -131,32 +141,46 @@ async def admin_userbot_detail(
     entry = next((e for e in pool.list_userbots() if e.id == ub_id), None)
 
     if not entry:
-        await callback.answer("❌ Не найдено", show_alert=True)
+        await callback.answer("Ne naydeno", show_alert=True)
         return
 
     m = entry.model
-    text = (
-        f" Userbot #{m.id} \n\n"
-        f"📱 Телефон: {m.phone} \n"
-        f"📊 Статус: {m.status.value} \n"
-        f"⚖️ Вес: {m.weight}\n"
-        f"📈 Сегодня: {m.requests_today} / {m.daily_limit}\n"
-        f"📊 Всего: {m.requests_total}\n"
-        f"⚠️ Ошибок: {m.error_count}\n"
-    )
+    flood_line = ""
     if m.flood_wait_until:
-        text += f"🚫 FloodWait до: {m.flood_wait_until.strftime('%H:%M:%S')}\n"
+        flood_line = "\nFloodWait do: {t}".format(
+            t=m.flood_wait_until.strftime("%H:%M:%S")
+        )
+
+    text = (
+        "=== Userbot #{id} ===\n\n"
+        "Telefon: {phone}\n"
+        "Status: {status}\n"
+        "Ves: {weight}\n"
+        "Segodnya: {today} / {limit}\n"
+        "Vsego: {total}\n"
+        "Oshibok: {errors}{flood}"
+    ).format(
+        id=m.id,
+        phone=m.phone,
+        status=m.status.value,
+        weight=m.weight,
+        today=m.requests_today,
+        limit=m.daily_limit,
+        total=m.requests_total,
+        errors=m.error_count,
+        flood=flood_line,
+    )
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="✅ Включить", callback_data=f"admin:ub:enable:{ub_id}"),
-            InlineKeyboardButton(text="⛔ Выключить", callback_data=f"admin:ub:disable:{ub_id}"),
+            InlineKeyboardButton(text="[ON] Vkl", callback_data="admin:ub:enable:{id}".format(id=ub_id)),
+            InlineKeyboardButton(text="[OFF] Vykl", callback_data="admin:ub:disable:{id}".format(id=ub_id)),
         ],
         [
-            InlineKeyboardButton(text="🔄 Перезапуск", callback_data=f"admin:ub:restart:{ub_id}"),
-            InlineKeyboardButton(text="🗑 Удалить", callback_data=f"admin:ub:delete:{ub_id}"),
+            InlineKeyboardButton(text="[R] Restart", callback_data="admin:ub:restart:{id}".format(id=ub_id)),
+            InlineKeyboardButton(text="[X] Udalit", callback_data="admin:ub:delete:{id}".format(id=ub_id)),
         ],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="admin:userbots")],
+        [InlineKeyboardButton(text="<< Nazad", callback_data="admin:userbots")],
     ])
 
     await _safe_edit(callback, text, reply_markup=keyboard)
@@ -167,48 +191,56 @@ async def admin_userbot_detail(
 async def admin_ub_enable(callback: CallbackQuery, pool: UserbotPool) -> None:
     ub_id = int(callback.data.split(":")[-1])
     await pool.enable_userbot(ub_id)
-    await callback.answer(f"✅ Userbot #{ub_id} включён", show_alert=True)
+    await callback.answer("Userbot #{id} vklyuchen".format(id=ub_id), show_alert=True)
 
 
 @router.callback_query(F.data.startswith("admin:ub:disable:"), IsAdmin())
 async def admin_ub_disable(callback: CallbackQuery, pool: UserbotPool) -> None:
     ub_id = int(callback.data.split(":")[-1])
     await pool.disable_userbot(ub_id)
-    await callback.answer(f"⛔ Userbot #{ub_id} выключен", show_alert=True)
+    await callback.answer("Userbot #{id} vyklyuchen".format(id=ub_id), show_alert=True)
 
 
 @router.callback_query(F.data.startswith("admin:ub:restart:"), IsAdmin())
 async def admin_ub_restart(callback: CallbackQuery, pool: UserbotPool) -> None:
     ub_id = int(callback.data.split(":")[-1])
-    await callback.answer("🔄 Перезапускаю...")
+    await callback.answer("Perezapuskayu...")
     ok = await pool.restart_userbot(ub_id)
-    status = "✅ Перезапущен" if ok else "❌ Ошибка перезапуска"
-    await callback.message.answer(f"{status}: Userbot #{ub_id}")
+    if ok:
+        status_text = "Userbot #{id} perezapushchen".format(id=ub_id)
+    else:
+        status_text = "Oshibka perezapuska userbot #{id}".format(id=ub_id)
+    await callback.message.answer(status_text)
 
 
 @router.callback_query(F.data.startswith("admin:ub:delete:"), IsAdmin())
 async def admin_ub_delete(callback: CallbackQuery, pool: UserbotPool) -> None:
     ub_id = int(callback.data.split(":")[-1])
     await pool.remove_userbot(ub_id)
-    await callback.answer(f"🗑 Userbot #{ub_id} удалён", show_alert=True)
+    await callback.answer("Userbot #{id} udalyon".format(id=ub_id), show_alert=True)
     entries = pool.list_userbots()
     builder = InlineKeyboardBuilder()
+    STATUS_LABELS = {
+        "idle": "[OK]", "busy": "[..]", "flood_wait": "[FW]",
+        "error": "[ER]", "disabled": "[--]", "offline": "[OF]",
+    }
     for entry in entries:
-        status_icon = {
-            "idle": "🟢", "busy": "🟡", "flood_wait": "🔴",
-            "error": "❌", "disabled": "⚫", "offline": "🔘",
-        }.get(entry.model.status.value, "❓")
+        label = STATUS_LABELS.get(entry.model.status.value, "[?]")
         builder.row(InlineKeyboardButton(
-            text=f"{status_icon} #{entry.id} {entry.model.phone}",
-            callback_data=f"admin:ub:{entry.id}",
+            text="{label} #{eid} {phone}".format(
+                label=label, eid=entry.id, phone=entry.model.phone
+            ),
+            callback_data="admin:ub:{id}".format(id=entry.id),
         ))
     builder.row(
-        InlineKeyboardButton(text="➕ Добавить", callback_data="admin:ub:add"),
-        InlineKeyboardButton(text="🔙 Назад", callback_data="admin:back"),
+        InlineKeyboardButton(text="[+] Dobavit", callback_data="admin:ub:add"),
+        InlineKeyboardButton(text="<< Nazad", callback_data="admin:back"),
     )
     await _safe_edit(
         callback,
-        f" 🤖 Userbot'ы ({len(entries)} шт.)\n\nВыберите для управления:",
+        "=== Userbots ({count} sht.) ===\n\nVyberite dlya upravleniya:".format(
+            count=len(entries)
+        ),
         reply_markup=builder.as_markup(),
     )
 
@@ -218,7 +250,7 @@ async def admin_ub_delete(callback: CallbackQuery, pool: UserbotPool) -> None:
 @router.callback_query(F.data == "admin:ub:add", IsAdmin())
 async def admin_ub_add_start(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(AddUserbotStates.waiting_phone)
-    await callback.message.answer("📱 Введите номер телефона (формат: +79991234567):")
+    await callback.message.answer("Vvedite nomer telefona (format: +79991234567):")
     await callback.answer()
 
 
@@ -226,24 +258,24 @@ async def admin_ub_add_start(callback: CallbackQuery, state: FSMContext) -> None
 async def admin_ub_add_phone(message: Message, state: FSMContext) -> None:
     await state.update_data(phone=message.text.strip())
     await state.set_state(AddUserbotStates.waiting_api_id)
-    await message.answer("🔑 Введите api_id (число):")
+    await message.answer("Vvedite api_id (chislo):")
 
 
 @router.message(AddUserbotStates.waiting_api_id, IsAdmin())
 async def admin_ub_add_api_id(message: Message, state: FSMContext) -> None:
     if not message.text or not message.text.strip().isdigit():
-        await message.answer("❌ api_id должен быть числом. Попробуйте ещё раз:")
+        await message.answer("api_id dolzhen byt chislom. Poprobuite eshche raz:")
         return
     await state.update_data(api_id=int(message.text.strip()))
     await state.set_state(AddUserbotStates.waiting_api_hash)
-    await message.answer("🔑 Введите api_hash:")
+    await message.answer("Vvedite api_hash:")
 
 
 @router.message(AddUserbotStates.waiting_api_hash, IsAdmin())
 async def admin_ub_add_api_hash(message: Message, state: FSMContext) -> None:
     await state.update_data(api_hash=message.text.strip())
     await state.set_state(AddUserbotStates.waiting_session)
-    await message.answer("📋 Введите session_string:")
+    await message.answer("Vvedite session_string (iz Pyrogram StringSession):")
 
 
 @router.message(AddUserbotStates.waiting_session, IsAdmin())
@@ -255,40 +287,45 @@ async def admin_ub_add_session(
     data = await state.get_data()
     await state.clear()
 
-    session = message.text.strip() if message.text else ""
-    if not session:
-        await message.answer("❌ Session не может быть пустым.")
+    session_str = message.text.strip() if message.text else ""
+    if not session_str:
+        await message.answer("Session ne mozhet byt pustym.")
         return
 
+    # BUG FIX: использовать новый API репозитория — передавать фабрику,
+    # а не открытую сессию, иначе сессия закроется до вызова pool.add_userbot()
     from infrastructure.database.repositories.userbot_repo import UserbotRepository
     from infrastructure.database.session import async_session_factory
 
-    async with async_session_factory() as session_db:
-        repo = UserbotRepository(session_db)
+    repo = UserbotRepository(session_factory=async_session_factory)
 
-        existing = await repo.get_by_phone(data["phone"])
-        if existing:
-            await message.answer(
-                f"⚠️ Userbot с номером {data['phone']} уже существует (#{existing.id}).\n"
-                "Удалите его сначала или используйте другой номер."
+    existing = await repo.get_by_phone(data["phone"])
+    if existing:
+        await message.answer(
+            "Userbot s nomerom {phone} uzhe sushchestvuet (#{id}).\n"
+            "Udalite ego snachala ili ispolzuyte drugoy nomer.".format(
+                phone=data["phone"], id=existing.id
             )
-            return
-
-        userbot = await repo.create(
-            phone=data["phone"],
-            api_id=data["api_id"],
-            api_hash=data["api_hash"],
-            session_string=session,
         )
+        return
+
+    userbot = await repo.create(
+        phone=data["phone"],
+        api_id=data["api_id"],
+        api_hash=data["api_hash"],
+        session_string=session_str,
+    )
 
     ok = await pool.add_userbot(userbot.id)
 
     if ok:
-        await message.answer(f"✅ Userbot #{userbot.id} добавлен и запущен!")
+        await message.answer(
+            "Userbot #{id} dobavlen i zapushchen!".format(id=userbot.id)
+        )
     else:
         await message.answer(
-            f"⚠️ Userbot #{userbot.id} сохранён, но не запустился. "
-            "Проверьте session_string."
+            "Userbot #{id} sokhranen, no ne zapustilsya. "
+            "Proverite session_string.".format(id=userbot.id)
         )
 
 # ── Статистика ────────────────────────────────────────────────────────────────
@@ -311,31 +348,47 @@ async def admin_stats(
 
     popular = await cache.get_popular(limit=5)
     popular_text = "\n".join(
-        f" {i+1}. {q} ({int(c)})" for i, (q, c) in enumerate(popular)
-    ) or " —"
+        "  {n}. {q} ({c})".format(n=i + 1, q=q, c=int(c))
+        for i, (q, c) in enumerate(popular)
+    ) or "  —"
+
+    redis_status = "OK" if redis_ok else "FAIL"
 
     await _safe_edit(
         callback,
-        " 📊 Статистика \n\n"
-        " Userbots: \n"
-        f" 🟢 Свободных: {pool_stats['idle']}\n"
-        f" 🟡 Занятых: {pool_stats['busy']}\n"
-        f" 🔴 FloodWait: {pool_stats['flood']}\n"
-        f" ❌ Ошибок: {pool_stats['error']}\n"
-        f" ⚫ Выключено: {pool_stats['disabled']}\n\n"
-        " Очередь: \n"
-        f" ⏳ В очереди: {queue_stats.get('queue_size', 0)}\n"
-        f" ⚙️ Обрабатывается: {queue_stats.get('processing', 0)}\n\n"
-        " Система: \n"
-        f" 💻 CPU: {cpu}%\n"
-        f" 🧠 RAM: {ram.percent}% ({ram.used // 1024 // 1024} MB)\n"
-        f" 📦 Redis: {'✅' if redis_ok else '❌'}\n\n"
-        " 🔥 Топ запросов: \n"
-        f"{popular_text}",
+        "=== Statistika ===\n\n"
+        "-- Userbots --\n"
+        "  Svobodnyh: {idle}\n"
+        "  Zanyatyh: {busy}\n"
+        "  FloodWait: {flood}\n"
+        "  Oshibok: {ub_error}\n"
+        "  Vyklyucheno: {disabled}\n\n"
+        "-- Ochered --\n"
+        "  V ocheredi: {q_size}\n"
+        "  Obrabatyvaetsya: {processing}\n\n"
+        "-- Sistema --\n"
+        "  CPU: {cpu}%\n"
+        "  RAM: {ram_pct}% ({ram_mb} MB)\n"
+        "  Redis: {redis}\n\n"
+        "-- Top zaprosov --\n"
+        "{popular}".format(
+            idle=pool_stats["idle"],
+            busy=pool_stats["busy"],
+            flood=pool_stats["flood"],
+            ub_error=pool_stats["error"],
+            disabled=pool_stats["disabled"],
+            q_size=queue_stats.get("queue_size", 0),
+            processing=queue_stats.get("processing", 0),
+            cpu=cpu,
+            ram_pct=ram.percent,
+            ram_mb=ram.used // 1024 // 1024,
+            redis=redis_status,
+            popular=popular_text,
+        ),
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [
-                InlineKeyboardButton(text="🔙 Назад", callback_data="admin:back"),
-                InlineKeyboardButton(text="🔄 Обновить", callback_data="admin:stats"),
+                InlineKeyboardButton(text="<< Nazad", callback_data="admin:back"),
+                InlineKeyboardButton(text="[R] Obnovit", callback_data="admin:stats"),
             ]
         ]),
     )
@@ -347,7 +400,7 @@ async def admin_stats(
 async def admin_logs(callback: CallbackQuery) -> None:
     import os
     log_path = "bot.log"
-    text = " 📋 Последние логи \n\n"
+    text = "=== Poslednie logi ===\n\n"
     if os.path.exists(log_path):
         with open(log_path, "r", encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
@@ -355,9 +408,9 @@ async def admin_logs(callback: CallbackQuery) -> None:
         # Telegram message limit is 4096 chars
         if len(last) > 3500:
             last = "..." + last[-3500:]
-        text += f"<pre>{last}</pre>" if last else "Файл пуст."
+        text += "<pre>{log}</pre>".format(log=last) if last else "Fayl pust."
     else:
-        text += "Файл логов не найден.\nУбедитесь что logging настроен на запись в bot.log"
+        text += "Fayl logov ne nayden.\nUbedites chto logging nastroyen na zapis v bot.log"
 
     await _safe_edit(
         callback,
@@ -366,42 +419,42 @@ async def admin_logs(callback: CallbackQuery) -> None:
     )
     await callback.answer()
 
-# ── Источники (заглушка) ──────────────────────────────────────────────────────
+# ── Источники ─────────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "admin:sources", IsAdmin())
 async def admin_sources(callback: CallbackQuery) -> None:
     await _safe_edit(
         callback,
-        " 📡 Источники музыки \n\n"
-        "Активные источники:\n"
-        "• VK Music — подключён\n\n"
-        "Управление источниками будет доступно в следующей версии.",
+        "=== Istochniki muzyki ===\n\n"
+        "Aktivnye istochniki:\n"
+        "  VK Music -- podklyuchen\n\n"
+        "Upravlenie istochnikami budet dostupno v sleduyushchey versii.",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=_BACK_BTN),
     )
     await callback.answer()
 
-# ── Каналы (заглушка) ─────────────────────────────────────────────────────────
+# ── Каналы ────────────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "admin:channels", IsAdmin())
 async def admin_channels(callback: CallbackQuery) -> None:
     await _safe_edit(
         callback,
-        " 📢 Управление каналами \n\n"
-        "Эта функция находится в разработке.\n"
-        "Здесь будет управление каналами для рассылки результатов.",
+        "=== Upravlenie kanalami ===\n\n"
+        "Eta funktsiya nakhoditsya v razrabotke.\n"
+        "Zdes budet upravlenie kanalami dlya rassylki rezultatov.",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=_BACK_BTN),
     )
     await callback.answer()
 
-# ── Пользователи (заглушка) ───────────────────────────────────────────────────
+# ── Пользователи ──────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "admin:users", IsAdmin())
 async def admin_users(callback: CallbackQuery) -> None:
     await _safe_edit(
         callback,
-        " 👥 Пользователи \n\n"
-        "Эта функция находится в разработке.\n"
-        "Здесь будет список пользователей бота и управление ими.",
+        "=== Polzovateli ===\n\n"
+        "Eta funktsiya nakhoditsya v razrabotke.\n"
+        "Zdes budet spisok polzovateley bota i upravlenie imi.",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=_BACK_BTN),
     )
     await callback.answer()
@@ -412,8 +465,8 @@ async def admin_users(callback: CallbackQuery) -> None:
 async def admin_broadcast_start(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(BroadcastStates.waiting_text)
     await callback.message.answer(
-        "📣 Введите текст для рассылки всем пользователям.\n"
-        "Для отмены отправьте /cancel"
+        "Vvedite tekst dlya rassylki vsem polzovatelyam.\n"
+        "Dlya otmeny otpravte /cancel"
     )
     await callback.answer()
 
@@ -423,8 +476,8 @@ async def admin_broadcast_send(message: Message, state: FSMContext) -> None:
     await state.clear()
     # Placeholder — реальная рассылка требует таблицы users в БД
     await message.answer(
-        "⚠️ Рассылка пока не реализована.\n"
-        "Для отправки нужно подключить таблицу пользователей."
+        "Rassylka poka ne realizovana.\n"
+        "Dlya otpravki nuzhno podklyuchit tablitsu polzovateley."
     )
 
 
@@ -433,9 +486,9 @@ async def admin_cancel(message: Message, state: FSMContext) -> None:
     current = await state.get_state()
     if current:
         await state.clear()
-        await message.answer("❌ Отменено.")
+        await message.answer("Otmeneno.")
     else:
-        await message.answer("Нечего отменять.")
+        await message.answer("Nechego otmenyat.")
 
 # ── Назад ─────────────────────────────────────────────────────────────────────
 
