@@ -205,8 +205,6 @@ async def admin_ub_restart(callback: CallbackQuery, pool: UserbotPool) -> None:
     ub_id = int(callback.data.split(":")[-1])
     await callback.answer("Perezapuskayu...")
     ok = await pool.restart_userbot(ub_id)
-    # BUG FIX: Python 3.10 does not allow quotes inside f-string expressions.
-    # Use a plain variable instead of f"{expr_with_quotes}".
     status_text = "Userbot #{id} perezapushchen".format(id=ub_id) if ok \
         else "Oshibka perezapuska userbot #{id}".format(id=ub_id)
     await callback.message.answer(status_text)
@@ -257,7 +255,6 @@ async def admin_ub_add_session(message: Message, state: FSMContext, pool: Userbo
     if not session_str:
         await message.answer("Session ne mozhet byt pustym.")
         return
-    # BUG FIX: use session_factory pattern, not a single closed session
     from infrastructure.database.repositories.userbot_repo import UserbotRepository
     from infrastructure.database.session import async_session_factory
     repo = UserbotRepository(session_factory=async_session_factory)
@@ -280,72 +277,6 @@ async def admin_ub_add_session(message: Message, state: FSMContext, pool: Userbo
             "Userbot #{id} sokhranen, no ne zapustilsya. "
             "Proverite session_string.".format(id=userbot.id)
         )
-
-
-# ── Sources ───────────────────────────────────────────────────────────────────
-
-@router.callback_query(F.data == "admin:sources", IsAdmin())
-async def admin_sources(callback: CallbackQuery) -> None:
-    from infrastructure.database.repositories.source_repo import SourceRepository
-    from infrastructure.database.session import async_session_factory
-    async with async_session_factory() as session:
-        repo = SourceRepository(session)
-        await repo.get_or_create_vk()
-        sources = await repo.get_all()
-    builder = InlineKeyboardBuilder()
-    for src in sources:
-        status_label = "ON" if src.enabled else "OFF"
-        action = "disable" if src.enabled else "enable"
-        builder.row(InlineKeyboardButton(
-            text="[{s}] {name} | avg:{avg}ms ok:{ok} err:{err}".format(
-                s=status_label,
-                name=src.name,
-                avg=int(src.avg_response_ms),
-                ok=src.success_count,
-                err=src.error_count,
-            ),
-            callback_data="admin:src:{action}:{id}".format(action=action, id=src.id),
-        ))
-    builder.row(InlineKeyboardButton(text="<< Nazad", callback_data="admin:back"))
-    lines = ["=== Istochniki muzyki ===\n"]
-    for src in sources:
-        status_label = "ON" if src.enabled else "OFF"
-        lines.append(
-            "[{s}] {name} (@{uname})\n"
-            "   Prioritet: {p} | Timeout: {t}s\n"
-            "   OK: {ok} | ERR: {err} | avg: {avg}ms\n".format(
-                s=status_label,
-                name=src.name,
-                uname=src.bot_username,
-                p=src.priority,
-                t=src.timeout,
-                ok=src.success_count,
-                err=src.error_count,
-                avg=int(src.avg_response_ms),
-            )
-        )
-    if not sources:
-        lines.append("Net nastroennykh istochnikov.")
-    await _safe_edit(callback, "\n".join(lines), reply_markup=builder.as_markup())
-    await callback.answer()
-
-@router.callback_query(F.data.startswith("admin:src:enable:"), IsAdmin())
-async def admin_src_enable(callback: CallbackQuery) -> None:
-    from infrastructure.database.repositories.source_repo import SourceRepository
-    from infrastructure.database.session import async_session_factory
-    async with async_session_factory() as s:
-        await SourceRepository(s).set_enabled(int(callback.data.split(":")[-1]), True)
-    await callback.answer("Istochnik vklyuchen", show_alert=True)
-    await admin_sources(callback)
-
-@router.callback_query(F.data.startswith("admin:src:disable:"), IsAdmin())
-async def admin_src_disable(callback: CallbackQuery) -> None:
-    from infrastructure.database.repositories.source_repo import SourceRepository
-    from infrastructure.database.session import async_session_factory
-    async with async_session_factory() as s:
-        await SourceRepository(s).set_enabled(int(callback.data.split(":")[-1]), False)
-    await callback.answer("Istochnik otklyuchen", show_alert=True)
-    await admin_sources(callback)
 
 
 # ── Users ─────────────────────────────────────────────────────────────────────
