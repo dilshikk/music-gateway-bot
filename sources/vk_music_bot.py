@@ -20,7 +20,7 @@ from sources.base import (
 )
 
 
-# ─── Парсинг ответа бота ──────────────────────────────────────────────────────
+# ─── Парсинг ответа бота ───────────────────────────────────────────────
 
 @dataclass
 class _ParsedResult:
@@ -118,7 +118,7 @@ def _parse_duration(s: str) -> int:
     return 0
 
 
-# ─── Источник ─────────────────────────────────────────────────────────────────
+# ─── Источник ───────────────────────────────────────────────────────────────────
 
 class VKMusicBotSource(MusicSource):
     """
@@ -137,8 +137,10 @@ class VKMusicBotSource(MusicSource):
     source_type  = "telegram_bot"
 
     # Задержки (секунды)
-    SEARCH_WAIT     = 5.0   # ждём ответ на поисковый запрос
-    AUDIO_WAIT      = 10.0  # ждём ответ после нажатия кнопки
+    # BUG FIX: увеличены таймауты: 5.0 и 10.0 было слишком мало
+    # при медленном ответе бота или высокой нагрузке сервера
+    SEARCH_WAIT     = 12.0  # ждём ответ на поисковый запрос
+    AUDIO_WAIT      = 20.0  # ждём ответ после нажатия кнопки
     POLL_INTERVAL   = 0.5   # интервал polling при ожидании
 
     def __init__(
@@ -151,7 +153,7 @@ class VKMusicBotSource(MusicSource):
         super().__init__(priority=priority, timeout=timeout, enabled=enabled)
         self._client = client
 
-    # ── Поиск ─────────────────────────────────────────────────────────────────
+    # ── Поиск ───────────────────────────────────────────────────────────────────────
 
     async def search(self, query: str, page: int = 1) -> SearchResult:
         start = time.monotonic()
@@ -170,10 +172,16 @@ class VKMusicBotSource(MusicSource):
             raise SourceUnavailableError(str(e)) from e
 
     async def _search_internal(self, query: str, page: int) -> SearchResult:
+        # BUG FIX: запоминаем last_id ДО отправки запроса, а не внутри _wait_for_reply.
+        # Если бот ответил очень быстро, внутренний get_chat_history в _wait_for_reply
+        # мог увидеть уже ответ и зафиксировать его как last_id, игнорируя в петле.
+        prev_id = await self._get_last_message_id()
+
         await self._client.send_message(self.bot_username, query)
 
         # Ждём ответ бота с inline-кнопками
         msg = await self._wait_for_reply(
+            prev_id=prev_id,
             has_markup=True,
             timeout=self.SEARCH_WAIT,
         )
@@ -196,7 +204,7 @@ class VKMusicBotSource(MusicSource):
             query=query,
         )
 
-    # ── Получение аудио ───────────────────────────────────────────────────────
+    # ── Получение аудио ──────────────────────────────────────────────────────
 
     async def get_audio(self, track: Track) -> AudioFile:
         start = time.monotonic()
@@ -215,7 +223,6 @@ class VKMusicBotSource(MusicSource):
             raise SourceUnavailableError(str(e)) from e
 
     async def _get_audio_internal(self, track: Track) -> AudioFile:
-        # BUG FIX: validate that source_track_id is present before clicking
         if not track.source_track_id:
             raise TrackNotFoundError(
                 f"Трек не имеет source_track_id: {track.title}"
@@ -226,11 +233,16 @@ class VKMusicBotSource(MusicSource):
         if not search_msg:
             raise TrackNotFoundError("Не найдено сообщение с результатами поиска")
 
+        # BUG FIX: запоминаем prev_id ДО нажатия кнопки.
+        # Бот может отправить аудио очень быстро; если prev_id захватывать внутри _wait_for_audio,
+        # то last_id может уже указывать на аудио-сообщение — и метод его пропустит.
+        prev_id = await self._get_last_message_id()
+
         # Нажимаем кнопку с нужным callback_data
         await search_msg.click(track.source_track_id)
 
         # Ждём сообщение с аудио
-        audio_msg = await self._wait_for_audio(timeout=self.AUDIO_WAIT)
+        audio_msg = await self._wait_for_audio(prev_id=prev_id, timeout=self.AUDIO_WAIT)
         if not audio_msg or not audio_msg.audio:
             raise TrackNotFoundError(f"Аудио не получено для трека: {track.title}")
 
@@ -243,7 +255,7 @@ class VKMusicBotSource(MusicSource):
             size=audio_msg.audio.file_size or track.size,
         )
 
-    # ── Health Check ──────────────────────────────────────────────────────────
+    # ── Health Check ─────────────────────────────────────────────────────────
 
     async def health_check(self) -> bool:
         try:
@@ -252,69 +264,89 @@ class VKMusicBotSource(MusicSource):
         except Exception:
             return False
 
-    # ── Навигация по страницам ────────────────────────────────────────────────
+    # ── Навигация по страницам ──────────────────────────────────────────────
 
     async def _navigate_to_page(self, msg: Message, target_page: int) -> Message:
         """Листает страницы через кнопку ➡️ до нужной страницы."""
         current = msg
         for _ in range(target_page - 1):
-            next_btn = _find_button(current, "➡️")
+            next_btn = _find_button(current, "\u27a1\ufe0f")
             if not next_btn:
-                # BUG FIX: if there's no next button, we've reached the last page;
-                # return current instead of silently continuing with a stale message
                 break
+
+            # BUG FIX: запоминаем prev_id ДО нажатия кнопки пагинации
+            prev_id = await self._get_last_message_id()
             await current.click(next_btn.callback_data)
-            # BUG FIX: re-fetch the updated message after click instead of using
-            # a stale _wait_for_reply that might return any new message from the bot
-            updated = await self._wait_for_reply(has_markup=True, timeout=self.SEARCH_WAIT)
+            updated = await self._wait_for_reply(
+                prev_id=prev_id,
+                has_markup=True,
+                timeout=self.SEARCH_WAIT,
+            )
             if updated:
                 current = updated
         return current
 
-    # ── Вспомогательные методы ────────────────────────────────────────────────
+    # ── Вспомогательные методы ────────────────────────────────────────────
+
+    async def _get_last_message_id(self) -> int:
+        """Возвращает ID последнего сообщения в чате с ботом. Используется как базовая линия."""
+        async for m in self._client.get_chat_history(self.bot_username, limit=1):
+            return m.id
+        return 0
 
     async def _wait_for_reply(
         self,
+        prev_id: int,
         has_markup: bool = False,
-        timeout: float = 5.0,
+        timeout: float = 12.0,
     ) -> Message | None:
         """
         Ожидает новое сообщение от бота методом polling.
-        Возвращает первое подходящее или None по таймауту.
+
+        prev_id — ID последнего сообщения ДО отправки запроса,
+        захваченный вызывающим кодом (не внутри этого метода).
+
+        BUG FIX: раньше last_id захватывался внутри этого метода уже после
+        отправки сообщения. Если бот ответил до первого get_chat_history,
+        ответ уже в истории — last_id фиксировался на нём и петля никогда
+        не возвращала сообщение. Теперь prev_id передаётся снаружи.
         """
         deadline = time.monotonic() + timeout
-        last_id: int | None = None
-
-        # Запоминаем ID последнего сообщения до запроса
-        async for m in self._client.get_chat_history(self.bot_username, limit=1):
-            last_id = m.id
+        last_seen_id = prev_id
 
         while time.monotonic() < deadline:
             await asyncio.sleep(self.POLL_INTERVAL)
-            async for m in self._client.get_chat_history(self.bot_username, limit=1):
-                if m.id != last_id:
-                    if has_markup and not m.reply_markup:
-                        # BUG FIX: update last_id so we don't keep comparing against
-                        # the original message — the bot may send multiple messages
-                        last_id = m.id
-                        continue
-                    return m
+            # BUG FIX: проверяем limit=3 чтобы не пропустить промежуточные сообщения
+            async for m in self._client.get_chat_history(self.bot_username, limit=3):
+                if m.id <= last_seen_id:
+                    break
+                # Новое сообщение
+                if has_markup and not m.reply_markup:
+                    # Промежуточное сообщение без кнопок — обновляем last_seen_id и продолжаем
+                    last_seen_id = m.id
+                    continue
+                return m
         return None
 
-    async def _wait_for_audio(self, timeout: float = 10.0) -> Message | None:
-        """Ждёт сообщение с аудио от бота."""
-        deadline = time.monotonic() + timeout
-        last_id: int | None = None
+    async def _wait_for_audio(self, prev_id: int, timeout: float = 20.0) -> Message | None:
+        """
+        Ждёт сообщение с аудио от бота.
 
-        async for m in self._client.get_chat_history(self.bot_username, limit=1):
-            last_id = m.id
+        prev_id — ID последнего сообщения ДО нажатия кнопки.
+
+        BUG FIX 1: раньше last_id захватывался внутри метода — аудио могло
+        прийти до захвата и стать новым last_id, затем игнорироваться.
+        BUG FIX 2: заменили проверку m.id != last_id на m.id > prev_id,
+        чтобы перехватывать все новые сообщения, а не только первое следующее.
+        """
+        deadline = time.monotonic() + timeout
 
         while time.monotonic() < deadline:
             await asyncio.sleep(self.POLL_INTERVAL)
-            # BUG FIX: limit=3 is not enough if the bot sends multiple non-audio
-            # messages quickly. Use limit=5 and check all of them.
+            # BUG FIX: limit=5 чтобы перехватить несколько сообщений если бот
+            # отправил несколько быстро — проверяем все до нахождения аудио
             async for m in self._client.get_chat_history(self.bot_username, limit=5):
-                if m.id != last_id and m.audio:
+                if m.id > prev_id and m.audio:
                     return m
         return None
 
@@ -326,7 +358,7 @@ class VKMusicBotSource(MusicSource):
         return None
 
 
-# ─── Вспомогательные функции ──────────────────────────────────────────────────
+# ─── Вспомогательные функции ──────────────────────────────────────────────
 
 def _find_button(msg: Message, text: str):
     """Находит кнопку по тексту в reply_markup."""
