@@ -40,6 +40,17 @@ class AddSourceStates(StatesGroup):
 
 
 # ---------------------------------------------------------------------------
+# Visual header constants
+# ---------------------------------------------------------------------------
+
+_HDR        = "[ADMIN] Istochniki muzyki"
+_HDR_ADD    = "[ADMIN] Dobavlenie istochnika"
+_HDR_DETAIL = "[ADMIN] Istochnik"
+_HDR_DELETE = "[ADMIN] Udalenie istochnika"
+_HINT_CANCEL = "\n\n/cancel — otmenit i vyyti"
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -81,10 +92,10 @@ def _sources_markup(sources: list) -> InlineKeyboardMarkup:
             )
         ])
     rows.append([
-        InlineKeyboardButton(text="[+] Dobavit", callback_data="admin:src:add"),
+        InlineKeyboardButton(text="[+] Dobavit istochnik", callback_data="admin:src:add"),
     ])
     rows.append([
-        InlineKeyboardButton(text="<< Nazad", callback_data="admin:back"),
+        InlineKeyboardButton(text="<< Nazad v admin", callback_data="admin:back"),
     ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -94,8 +105,8 @@ def _detail_markup(src_id: int, enabled: bool) -> InlineKeyboardMarkup:
     toggle_data = "admin:src:toggle:{}".format(src_id)
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=toggle_text, callback_data=toggle_data)],
-        [InlineKeyboardButton(text="[X] Udalit",  callback_data="admin:src:delete:{}".format(src_id))],
-        [InlineKeyboardButton(text="<< Nazad",    callback_data="admin:sources")],
+        [InlineKeyboardButton(text="[X] Udalit istochnik", callback_data="admin:src:delete:{}".format(src_id))],
+        [InlineKeyboardButton(text="<< K spisku istochnikov", callback_data="admin:sources")],
     ])
 
 
@@ -123,7 +134,8 @@ def _detail_text(src) -> str:
     )
     avg_ms = int(src.avg_response_ms)
     return (
-        "=== Istochnik #{id} ===\n\n"
+        "{hdr} #{id}\n"
+        "{'='*30}\n"
         "Nazvanie:  {name}\n"
         "Username:  @{username}\n"
         "Tip:       {tip}\n"
@@ -133,6 +145,7 @@ def _detail_text(src) -> str:
         "OK: {ok} | ERR: {err} | avg: {avg}ms\n"
         "Dobavlen:  {created}"
     ).format(
+        hdr=_HDR_DETAIL,
         id=src.id,
         name=src.name,
         username=src.bot_username,
@@ -149,13 +162,15 @@ def _detail_text(src) -> str:
 
 def _preview_text(data: dict) -> str:
     return (
-        "=== Novyi istochnik ===\n\n"
+        "{hdr} — Predprosmotr\n"
+        "{'='*30}\n"
         "Nazvanie:  {name}\n"
         "Username:  @{username}\n"
         "Prioritet: {priority}\n"
         "Timeout:   {timeout}s\n\n"
-        "Dobavit?"
+        "Proverite dannye i nazmite [OK] Dobavit."
     ).format(
+        hdr=_HDR_ADD,
         name=data["name"],
         username=data["username"],
         priority=data["priority"],
@@ -182,6 +197,12 @@ def _fsm_confirm_markup() -> InlineKeyboardMarkup:
     ])
 
 
+def _fsm_cancel_only_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="[X] Otmenit", callback_data="admin:src:add:cancel")]
+    ])
+
+
 # ---------------------------------------------------------------------------
 # Список источников
 # ---------------------------------------------------------------------------
@@ -196,7 +217,12 @@ async def cb_sources_list(query: CallbackQuery, state: FSMContext) -> None:
         sources = await repo.get_all()
 
     count  = len(sources)
-    text   = "=== Istochniki muzyki ({}) ===\n\nVyberite istochnik dlya upravleniya:".format(count)
+    text   = (
+        "{hdr}\n"
+        "{'='*30}\n"
+        "Vsego istochnikov: {count}\n\n"
+        "Nazmite na istochnik dlya upravleniya:"
+    ).format(hdr=_HDR, count=count)
     markup = _sources_markup(sources)
     await _safe_edit(query, text, markup)
 
@@ -238,7 +264,7 @@ async def cb_source_toggle(query: CallbackQuery) -> None:
         await repo.set_enabled(src_id, new_state)
         src = await repo.get_by_id(src_id)
 
-    label = "Vklyuchen" if src.enabled else "Otklyuchen"
+    label = "[ON] Vklyuchen" if src.enabled else "[OFF] Otklyuchen"
     await query.answer(label)
     await _safe_edit(query, _detail_text(src), _detail_markup(src.id, src.enabled))
 
@@ -266,7 +292,14 @@ async def cb_source_delete_ask(query: CallbackQuery) -> None:
         await query.answer("Istochnik ne naiden.", show_alert=True)
         return
 
-    text = 'Udalit istochnik "{name}"? Eto deystvie nelzya otmenit.'.format(name=src.name)
+    text = (
+        "{hdr}\n"
+        "{'='*30}\n"
+        'Vy sobiraetes udalit:\n\n'
+        "Nazvanie: {name}\n"
+        "Username: @{username}\n\n"
+        "Eto deystvie nelzya otmenit!"
+    ).format(hdr=_HDR_DELETE, name=src.name, username=src.bot_username)
     await _safe_edit(query, text, _confirm_delete_markup(src_id))
 
 
@@ -300,7 +333,12 @@ async def cb_source_delete_confirm(query: CallbackQuery) -> None:
         sources = await repo.get_all()
 
     count  = len(sources)
-    text   = "=== Istochniki muzyki ({}) ===\n\nVyberite istochnik dlya upravleniya:".format(count)
+    text   = (
+        "{hdr}\n"
+        "{'='*30}\n"
+        "Vsego istochnikov: {count}\n\n"
+        "Nazmite na istochnik dlya upravleniya:"
+    ).format(hdr=_HDR, count=count)
     markup = _sources_markup(sources)
     await _safe_edit(query, text, markup)
 
@@ -314,14 +352,15 @@ async def cb_source_delete_confirm(query: CallbackQuery) -> None:
 async def cb_source_add_start(query: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(AddSourceStates.waiting_name)
-    markup = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="[X] Otmenit", callback_data="admin:src:add:cancel")]
-    ])
-    await _safe_edit(
-        query,
-        "Dobavlenie istochnika (1/4)\n\nVvedite nazvanie istochnika (napr: \"Spotify Bot\"):",
-        markup,
-    )
+    text = (
+        "{hdr}\n"
+        "Shag 1 iz 4: Nazvanie\n"
+        "{'='*30}\n\n"
+        "Vvedite nazvanie istochnika.\n"
+        'Primer: "Spotify Bot", "VK Music Pro"\n'
+        "{hint}"
+    ).format(hdr=_HDR_ADD, hint=_HINT_CANCEL)
+    await _safe_edit(query, text, _fsm_cancel_only_markup())
 
 
 # ---------------------------------------------------------------------------
@@ -334,17 +373,22 @@ async def fsm_waiting_name(message: Message, state: FSMContext) -> None:
     name = message.text.strip() if message.text else ""
     if not name:
         await message.answer(
-            "Nazvanie ne mozhet byt pustym. Poprobuite snova:",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="[X] Otmenit", callback_data="admin:src:add:cancel")]
-            ]),
+            "{hdr}\nShag 1 iz 4: Nazvanie\n{'='*30}\n\n"
+            "Nazvanie ne mozhet byt pustym. Vvedite snova:{hint}".format(
+                hdr=_HDR_ADD, hint=_HINT_CANCEL
+            ),
+            reply_markup=_fsm_cancel_only_markup(),
         )
         return
 
     await state.update_data(name=name)
     await state.set_state(AddSourceStates.waiting_username)
     await message.answer(
-        "Dobavlenie istochnika (2/4)\n\nVvedite @username bota-istochnika (bez @):",
+        "{hdr}\nShag 2 iz 4: Username\n{'='*30}\n\n"
+        "Vvedite @username bota-istochnika (bez @).\n"
+        "Primer: vkmusic_bot, spotify_dl_bot{hint}".format(
+            hdr=_HDR_ADD, hint=_HINT_CANCEL
+        ),
         reply_markup=_fsm_nav_markup("admin:src:add:back:name"),
     )
 
@@ -360,7 +404,10 @@ async def fsm_waiting_username(message: Message, state: FSMContext) -> None:
 
     if not re.fullmatch(r"[A-Za-z0-9_]{3,64}", username):
         await message.answer(
-            "Nekorektny username. Ispolzuyte latinskie bukvy, tsifry i _. Poprobuite snova:",
+            "{hdr}\nShag 2 iz 4: Username\n{'='*30}\n\n"
+            "Nekorektny username.\n"
+            "Ispolzuyte latinskie bukvy, tsifry i _. Dlina 3-64.\n"
+            "Vvedite snova:{hint}".format(hdr=_HDR_ADD, hint=_HINT_CANCEL),
             reply_markup=_fsm_nav_markup("admin:src:add:back:name"),
         )
         return
@@ -368,7 +415,11 @@ async def fsm_waiting_username(message: Message, state: FSMContext) -> None:
     await state.update_data(username=username)
     await state.set_state(AddSourceStates.waiting_priority)
     await message.answer(
-        "Dobavlenie istochnika (3/4)\n\nVvedite prioritet (chislo 1-100, vyshe = vazhnee):",
+        "{hdr}\nShag 3 iz 4: Prioritet\n{'='*30}\n\n"
+        "Vvedite prioritet — tseloe chislo ot 1 do 100.\n"
+        "Chem vyshe, tem chashche budet ispolzovatsya etot istochnik.{hint}".format(
+            hdr=_HDR_ADD, hint=_HINT_CANCEL
+        ),
         reply_markup=_fsm_nav_markup("admin:src:add:back:username"),
     )
 
@@ -383,7 +434,10 @@ async def fsm_waiting_priority(message: Message, state: FSMContext) -> None:
     raw = (message.text or "").strip()
     if not raw.isdigit() or not (1 <= int(raw) <= 100):
         await message.answer(
-            "Nekorektny prioritet. Vvedite tseloe chislo ot 1 do 100:",
+            "{hdr}\nShag 3 iz 4: Prioritet\n{'='*30}\n\n"
+            "Nekorektny prioritet. Vvedite tseloe chislo ot 1 do 100:{hint}".format(
+                hdr=_HDR_ADD, hint=_HINT_CANCEL
+            ),
             reply_markup=_fsm_nav_markup("admin:src:add:back:username"),
         )
         return
@@ -391,7 +445,9 @@ async def fsm_waiting_priority(message: Message, state: FSMContext) -> None:
     await state.update_data(priority=int(raw))
     await state.set_state(AddSourceStates.waiting_timeout)
     await message.answer(
-        "Dobavlenie istochnika (4/4)\n\nVvedite timeout v sekundakh (10-120):",
+        "{hdr}\nShag 4 iz 4: Timeout\n{'='*30}\n\n"
+        "Vvedite maksimalnoye vremya ozhidaniya otveta v sekundakh (10-120).\n"
+        "Rekomenduetsya: 30{hint}".format(hdr=_HDR_ADD, hint=_HINT_CANCEL),
         reply_markup=_fsm_nav_markup("admin:src:add:back:priority"),
     )
 
@@ -406,7 +462,10 @@ async def fsm_waiting_timeout(message: Message, state: FSMContext) -> None:
     raw = (message.text or "").strip()
     if not raw.isdigit() or not (10 <= int(raw) <= 120):
         await message.answer(
-            "Nekorektny timeout. Vvedite tseloe chislo ot 10 do 120:",
+            "{hdr}\nShag 4 iz 4: Timeout\n{'='*30}\n\n"
+            "Nekorektny timeout. Vvedite tseloe chislo ot 10 do 120:{hint}".format(
+                hdr=_HDR_ADD, hint=_HINT_CANCEL
+            ),
             reply_markup=_fsm_nav_markup("admin:src:add:back:priority"),
         )
         return
@@ -430,13 +489,13 @@ async def fsm_back_to_name(query: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(AddSourceStates.waiting_name)
     data = await state.get_data()
     hint = ' (tekushchee: "{val}")'.format(val=data["name"]) if data.get("name") else ""
-    markup = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="[X] Otmenit", callback_data="admin:src:add:cancel")]
-    ])
     await _safe_edit(
         query,
-        "Dobavlenie istochnika (1/4)\n\nVvedite nazvanie istochnika{hint}:".format(hint=hint),
-        markup,
+        "{hdr}\nShag 1 iz 4: Nazvanie\n{'='*30}\n\n"
+        "Vvedite nazvanie istochnika{hint}:{cancel}".format(
+            hdr=_HDR_ADD, hint=hint, cancel=_HINT_CANCEL
+        ),
+        _fsm_cancel_only_markup(),
     )
 
 
@@ -447,7 +506,10 @@ async def fsm_back_to_username(query: CallbackQuery, state: FSMContext) -> None:
     hint = " (tekushchee: @{val})".format(val=data["username"]) if data.get("username") else ""
     await _safe_edit(
         query,
-        "Dobavlenie istochnika (2/4)\n\nVvedite @username bota-istochnika (bez @){hint}:".format(hint=hint),
+        "{hdr}\nShag 2 iz 4: Username\n{'='*30}\n\n"
+        "Vvedite @username bota-istochnika (bez @){hint}:{cancel}".format(
+            hdr=_HDR_ADD, hint=hint, cancel=_HINT_CANCEL
+        ),
         _fsm_nav_markup("admin:src:add:back:name"),
     )
 
@@ -459,7 +521,10 @@ async def fsm_back_to_priority(query: CallbackQuery, state: FSMContext) -> None:
     hint = " (tekushchee: {val})".format(val=data["priority"]) if data.get("priority") else ""
     await _safe_edit(
         query,
-        "Dobavlenie istochnika (3/4)\n\nVvedite prioritet (1-100, vyshe = vazhnee){hint}:".format(hint=hint),
+        "{hdr}\nShag 3 iz 4: Prioritet\n{'='*30}\n\n"
+        "Vvedite prioritet (1-100){hint}:{cancel}".format(
+            hdr=_HDR_ADD, hint=hint, cancel=_HINT_CANCEL
+        ),
         _fsm_nav_markup("admin:src:add:back:username"),
     )
 
@@ -476,7 +541,12 @@ async def _fsm_cancel_to_list(state: FSMContext) -> tuple[str, InlineKeyboardMar
         repo    = SourceRepository(session)
         sources = await repo.get_all()
     count  = len(sources)
-    text   = "=== Istochniki muzyki ({}) ===\n\nVyberite istochnik dlya upravleniya:".format(count)
+    text   = (
+        "{hdr}\n"
+        "{'='*30}\n"
+        "Vsego istochnikov: {count}\n\n"
+        "Nazmite na istochnik dlya upravleniya:"
+    ).format(hdr=_HDR, count=count)
     markup = _sources_markup(sources)
     return text, markup
 
@@ -491,10 +561,15 @@ async def fsm_cancel_callback(query: CallbackQuery, state: FSMContext) -> None:
 async def fsm_cancel_command(message: Message, state: FSMContext) -> None:
     current = await state.get_state()
     if current is None:
-        await message.answer("Nichego ne otmenyaem.")
+        await message.answer(
+            "[ADMIN] Nichego ne otmenyaem — net aktivnogo deystviya."
+        )
         return
     text, markup = await _fsm_cancel_to_list(state)
-    await message.answer(text, reply_markup=markup)
+    await message.answer(
+        "[ADMIN] Deystvie otmeneno.\n\n" + text,
+        reply_markup=markup,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -528,7 +603,7 @@ async def fsm_confirm_create(query: CallbackQuery, state: FSMContext) -> None:
         await session.refresh(new_source)
         src_id = new_source.id
 
-    await query.answer("Istochnik dobavlen!")
+    await query.answer("[ADMIN] Istochnik dobavlen!")
 
     async with async_session_factory() as session:
         repo = SourceRepository(session)
@@ -537,10 +612,5 @@ async def fsm_confirm_create(query: CallbackQuery, state: FSMContext) -> None:
     if src:
         await _safe_edit(query, _detail_text(src), _detail_markup(src.id, src.enabled))
     else:
-        async with async_session_factory() as session:
-            repo    = SourceRepository(session)
-            sources = await repo.get_all()
-        count  = len(sources)
-        text   = "=== Istochniki muzyki ({}) ===\n\nVyberite istochnik dlya upravleniya:".format(count)
-        markup = _sources_markup(sources)
+        text, markup = await _fsm_cancel_to_list(state)
         await _safe_edit(query, text, markup)
