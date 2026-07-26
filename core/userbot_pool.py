@@ -33,10 +33,18 @@ class UserbotEntry:
 
     async def acquire(self) -> bool:
         """Попытаться занять userbot. Возвращает True если успешно."""
-        if not self._lock.locked() and self.is_available:
-            await self._lock.acquire()
+        # BUG FIX: the original code checked is_available *before* acquiring the lock,
+        # creating a TOCTOU race condition. Two concurrent callers could both pass the
+        # is_available check and both acquire(). Use try_acquire pattern instead.
+        if not self.is_available:
+            return False
+        acquired = self._lock.locked() is False and not self._lock.locked()
+        # asyncio.Lock has no try_acquire; use acquire with immediate release on failure
+        try:
+            await asyncio.wait_for(self._lock.acquire(), timeout=0)
             return True
-        return False
+        except asyncio.TimeoutError:
+            return False
 
     def release(self) -> None:
         if self._lock.locked():
@@ -155,9 +163,9 @@ class UserbotPool:
         """Ставит userbot в режим FloodWait с авто-восстановлением."""
         entry.release()
         entry.model.status = UserbotStatus.FLOOD_WAIT
-        entry.model.flood_wait_until = datetime.now(timezone.utc).replace(
-            second=0, microsecond=0
-        )
+        # BUG FIX: original code reset seconds/microseconds to 0, storing a
+        # slightly incorrect timestamp. Store the exact current UTC time instead.
+        entry.model.flood_wait_until = datetime.now(timezone.utc)
         await self._repo.save(entry.model)
 
         logger.warning(

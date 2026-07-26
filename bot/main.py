@@ -23,7 +23,7 @@ from sources.registry import SourceRegistry
 from sources.vk_music_bot import VKMusicBotSource
 from bot.handlers import inline, inline_download, inline_feedback
 from bot.middlewares.i18n import I18nMiddleware
-from bot.handlers import settings, favorites, popular
+from bot.handlers import settings as settings_handler, favorites, popular
 
 logging.basicConfig(
     level=settings.LOG_LEVEL,
@@ -39,8 +39,17 @@ async def main() -> None:
     cache   = CacheManager(redis)
 
     # ── БД + компоненты ───────────────────────────────────────────────────────
-    async with async_session_factory() as session:
-        repo     = UserbotRepository(session)
+    # BUG FIX: original code started pool and queue *inside* `async with
+    # async_session_factory() as session`, meaning the SQLAlchemy session was
+    # closed as soon as the `async with` block exited — before the bot even
+    # started polling. The session factory must remain open for the lifetime of
+    # the application, or the repo must use a session-per-request pattern.
+    # Here we create a persistent session and close it in the `finally` block.
+    db_session = async_session_factory()
+    await db_session.__aenter__()
+
+    try:
+        repo     = UserbotRepository(db_session)
         pool     = UserbotPool(repo)
         registry = SourceRegistry()
         registry.register(VKMusicBotSource(client=None, priority=10))  # type: ignore[arg-type]
@@ -51,56 +60,55 @@ async def main() -> None:
         await pool.start()
         await queue.start()
 
-    # ── Bot + Dispatcher ──────────────────────────────────────────────────────
-    bot = Bot(
-        token=settings.BOT_TOKEN,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-    )
-    dp = Dispatcher(storage=storage)
+        # ── Bot + Dispatcher ──────────────────────────────────────────────────
+        bot = Bot(
+            token=settings.BOT_TOKEN,
+            default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+        )
+        dp = Dispatcher(storage=storage)
 
-    # Передаём зависимости через workflow_data
-    dp["cache"]          = cache
-    dp["queue"]          = queue
-    dp["search_manager"] = search_manager
-    dp["pool"]           = pool
+        # Передаём зависимости через workflow_data
+        dp["cache"]          = cache
+        dp["queue"]          = queue
+        dp["search_manager"] = search_manager
+        dp["pool"]           = pool
 
-    # ── Middlewares ───────────────────────────────────────────────────────────
-    dp.message.middleware(ThrottleMiddleware())
-    dp.message.middleware(AuthMiddleware())
-    dp.message.middleware(RateLimitMiddleware(cache))
-    
-    
-    dp.message.middleware(I18nMiddleware())
-    dp.callback_query.middleware(I18nMiddleware())
-    
-    # Роутеры (добавить):
-    dp.include_router(settings.router)
-    dp.include_router(favorites.router)
-    dp.include_router(popular.router)
+        # ── Middlewares ───────────────────────────────────────────────────────
+        dp.message.middleware(ThrottleMiddleware())
+        dp.message.middleware(AuthMiddleware())
+        dp.message.middleware(RateLimitMiddleware(cache))
+        dp.message.middleware(I18nMiddleware())
+        dp.callback_query.middleware(AuthMiddleware())
+        dp.callback_query.middleware(I18nMiddleware())
 
+        # ── Роутеры ───────────────────────────────────────────────────────────
+        # BUG FIX: original code registered some routers after the middlewares
+        # block was split across two places and before callback_query middleware
+        # was registered. All routers are now registered in one place, after all
+        # middlewares have been attached.
+        dp.include_router(start.router)
+        dp.include_router(search.router)
+        dp.include_router(subscription.router)
+        dp.include_router(admin.router)
+        dp.include_router(inline.router)
+        dp.include_router(inline_download.router)
+        dp.include_router(inline_feedback.router)
+        dp.include_router(settings_handler.router)
+        dp.include_router(favorites.router)
+        dp.include_router(popular.router)
 
-    dp.callback_query.middleware(AuthMiddleware())
+        # ── Запуск ────────────────────────────────────────────────────────────
+        logger.info("Бот запущен")
+        try:
+            await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+        finally:
+            await queue.stop()
+            await pool.stop()
+            await bot.session.close()
+            logger.info("Бот остановлен")
 
-    # ── Роутеры ───────────────────────────────────────────────────────────────
-    dp.include_router(start.router)
-    dp.include_router(search.router)
-    dp.include_router(subscription.router)
-    dp.include_router(admin.router)
-
-    # Подключаем роутеры inline
-    dp.include_router(inline.router)
-    dp.include_router(inline_download.router)
-    dp.include_router(inline_feedback.router)
-
-    # ── Запуск ────────────────────────────────────────────────────────────────
-    logger.info("Бот запущен")
-    try:
-        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
-        await queue.stop()
-        await pool.stop()
-        await bot.session.close()
-        logger.info("Бот остановлен")
+        await db_session.__aexit__(None, None, None)
 
 
 if __name__ == "__main__":

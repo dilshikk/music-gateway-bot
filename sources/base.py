@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 # ─── Data Transfer Objects ────────────────────────────────────────────────────
@@ -40,7 +40,8 @@ class SearchResult:
     has_next: bool = False
     source_name: str = ""
     query: str = ""
-    fetched_at: datetime = field(default_factory=datetime.utcnow)
+    # BUG FIX: datetime.utcnow() is deprecated since Python 3.12 — use timezone-aware datetime
+    fetched_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # ─── Exceptions ───────────────────────────────────────────────────────────────
