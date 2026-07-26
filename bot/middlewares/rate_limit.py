@@ -3,6 +3,7 @@ from typing import Any, Awaitable, Callable
 from aiogram import BaseMiddleware
 from aiogram.types import Message, TelegramObject
 
+from config.settings import settings
 from core.cache_manager import CacheManager
 from infrastructure.database.models import User
 
@@ -11,6 +12,7 @@ class RateLimitMiddleware(BaseMiddleware):
     """
     Блокирует запросы при превышении лимита.
     Premium пользователи получают увеличенный лимит.
+    Администраторы (ADMIN_IDS) полностью освобождены от ограничений.
     """
 
     def __init__(self, cache: CacheManager) -> None:
@@ -30,6 +32,10 @@ class RateLimitMiddleware(BaseMiddleware):
             await event.answer("🚫 Вы заблокированы.")
             return
 
+        # Admins bypass rate limiting completely
+        if event.from_user and event.from_user.id in settings.ADMIN_IDS:
+            return await handler(event, data)
+
         allowed, retry_after = await self._cache.check_rate_limit(user.id)
         if not allowed:
             m, s = divmod(retry_after, 60)
@@ -39,7 +45,7 @@ class RateLimitMiddleware(BaseMiddleware):
                 time_str = f"{s} сек"
             await event.answer(
                 f"⏳ Слишком много запросов.\n"
-                f"Подождите <b>{time_str}</b>.",
+                f"Подождите {time_str}.",
             )
             return
 
