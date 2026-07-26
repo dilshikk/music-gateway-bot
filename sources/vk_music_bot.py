@@ -67,13 +67,19 @@ def _parse_search_message(msg: Message) -> _ParsedResult:
         logger.warning("[parse] строка 'Результаты ...' не найдена в тексте сообщения")
 
     button_map: dict[int, str] = {}
+    # Также сохраняем плоский индекс кнопки в клавиатуре — нужен для click(int)
+    button_index_map: dict[int, int] = {}  # номер трека → плоский индекс кнопки
+    flat_index = 0
     if msg.reply_markup:
         for row in msg.reply_markup.inline_keyboard:
             for btn in row:
                 if btn.text.isdigit() and btn.callback_data:
-                    button_map[int(btn.text)] = btn.callback_data
-                    logger.debug("[parse] кнопка #%s → callback_data=%r",
-                                 btn.text, btn.callback_data)
+                    track_num = int(btn.text)
+                    button_map[track_num] = btn.callback_data
+                    button_index_map[track_num] = flat_index
+                    logger.debug("[parse] кнопка #%s → flat_index=%d  callback_data=%r",
+                                 btn.text, flat_index, btn.callback_data)
+                flat_index += 1
     logger.debug("[parse] всего кнопок с треками: %d", len(button_map))
 
     line_pattern = re.compile(
@@ -99,11 +105,12 @@ def _parse_search_message(msg: Message) -> _ParsedResult:
             artist, title = "", raw_title
 
         cbd = button_map.get(num, "")
+        btn_idx = button_index_map.get(num, -1)
         logger.debug(
             "[parse] #%d  artist=%r  title=%r  dur=%ds  size=%.1fMB  "
-            "bitrate=%dk  lossless=%s  callback_data=%r",
+            "bitrate=%dk  lossless=%s  btn_index=%d  callback_data=%r",
             num, artist.strip(), title.strip(), duration, size_mb,
-            bitrate, lossless, cbd,
+            bitrate, lossless, btn_idx, cbd,
         )
 
         tracks.append(Track(
@@ -114,7 +121,7 @@ def _parse_search_message(msg: Message) -> _ParsedResult:
             bitrate=bitrate,
             is_lossless=lossless,
             source_track_id=cbd,
-            raw={"button_num": num, "callback_data": cbd},
+            raw={"button_num": num, "callback_data": cbd, "button_index": btn_idx},
         ))
 
     logger.debug("[parse] итог: %d треков распаршено", len(tracks))
@@ -140,9 +147,9 @@ class VKMusicBotSource(MusicSource):
     Алгоритм:
       1. Отправить текстовый запрос боту
       2. Дождаться ответа с inline-кнопками
-      3. Нажать кнопку нужного трека через request_callback_answer()
+      3. Нажать кнопку нужного трека через click(плоской_индекс)
       4. Дождаться сообщения с аудио
-      5a. Если target_chat_id задан: userbot пересылает аудио напрямую в чат (already_sent=True)
+      5a. Если target_chat_id задан: userbot пересылает аудио напрямую (already_sent=True)
       5b. Иначе: возвращаем file_id для пересылки ботом
     """
 
@@ -235,8 +242,9 @@ class VKMusicBotSource(MusicSource):
     ) -> AudioFile:
         logger.info(
             "[get_audio] начало  artist=%r  title=%r  "
-            "source_track_id=%r  target_chat_id=%s",
-            track.artist, track.title, track.source_track_id, target_chat_id,
+            "source_track_id=%r  btn_index=%s  target_chat_id=%s",
+            track.artist, track.title, track.source_track_id,
+            track.raw.get("button_index"), target_chat_id,
         )
         start = time.monotonic()
         try:
@@ -272,29 +280,38 @@ class VKMusicBotSource(MusicSource):
                 f"Трек не имеет source_track_id: {track.title}"
             )
 
+        # Плоский индекс кнопки в клавиатуре, сохранённый при парсинге
+        btn_index: int = track.raw.get("button_index", -1)
+        if btn_index < 0:
+            logger.error(
+                "[get_audio_internal] button_index не задан для %r  raw=%r",
+                track.title, track.raw,
+            )
+            raise TrackNotFoundError(
+                f"Нет button_index для трека: {track.title}"
+            )
+
         logger.debug("[get_audio_internal] ищём сообщение с кнопками в истории чата")
         search_msg = await self._get_last_search_message()
         if not search_msg:
             logger.error("[get_audio_internal] не найдено сообщение с результатами (limit=5)")
             raise TrackNotFoundError("Не найдено сообщение с результатами поиска")
 
-        logger.debug("[get_audio_internal] нашли search_msg_id=%d  chat_id=%s",
-                     search_msg.id, search_msg.chat.id)
+        logger.debug("[get_audio_internal] нашли search_msg_id=%d", search_msg.id)
 
         # Запоминаем prev_id ДО нажатия кнопки
         prev_id = await self._get_last_message_id()
-        logger.debug("[get_audio_internal] prev_id=%d  нажимаем callback_data=%r",
-                     prev_id, track.source_track_id)
-
-        # BUG FIX: message.click(str) ищет кнопку по тексту (не по callback_data).
-        # Используем request_callback_answer() напрямую с callback_data.
-        await self._client.request_callback_answer(
-            chat_id=search_msg.chat.id,
-            message_id=search_msg.id,
-            callback_data=track.source_track_id,
+        logger.debug(
+            "[get_audio_internal] prev_id=%d  нажимаем кнопку btn_index=%d",
+            prev_id, btn_index,
         )
-        logger.debug("[get_audio_internal] callback отправлен  ждём аудио (timeout=%.1fs)",
-                     self.AUDIO_WAIT)
+
+        # BUG FIX: click(str) ищет по тексту кнопки, request_callback_answer требует
+        # расшифрованные данные и даёт DATA_INVALID.
+        # click(int) нажимает по плоскому индексу в клавиатуре — работает всегда.
+        await search_msg.click(btn_index)
+        logger.debug("[get_audio_internal] click(%d) отправлен  ждём аудио (timeout=%.1fs)",
+                     btn_index, self.AUDIO_WAIT)
 
         audio_msg = await self._wait_for_audio(prev_id=prev_id, timeout=self.AUDIO_WAIT)
         if not audio_msg or not audio_msg.audio:
@@ -316,11 +333,11 @@ class VKMusicBotSource(MusicSource):
             logger.info(
                 "[get_audio_internal] пересылаем аудио в чат пользователя  "
                 "target_chat_id=%d  from_chat=%s  msg_id=%d",
-                target_chat_id, search_msg.chat.id, audio_msg.id,
+                target_chat_id, self.bot_username, audio_msg.id,
             )
             sent = await self._client.copy_message(
                 chat_id=target_chat_id,
-                from_chat_id=search_msg.chat.id,
+                from_chat_id=self.bot_username,
                 message_id=audio_msg.id,
             )
             logger.info(
@@ -372,21 +389,17 @@ class VKMusicBotSource(MusicSource):
             logger.debug("[navigate] шаг %d/%d  current_msg_id=%d",
                          step + 1, target_page - 1, current.id)
 
-            next_btn = _find_button(current, "\u27a1\ufe0f")
-            if not next_btn:
+            # Находим плоский индекс кнопки ➡️
+            next_btn_index = _find_button_flat_index(current, "\u27a1\ufe0f")
+            if next_btn_index < 0:
                 logger.warning("[navigate] кнопка ➡️ не найдена на шаге %d", step + 1)
                 break
 
-            logger.debug("[navigate] нажимаем ➡️  callback_data=%r", next_btn.callback_data)
+            logger.debug("[navigate] нажимаем ➡️  flat_index=%d", next_btn_index)
             prev_id = await self._get_last_message_id()
-
-            # Также используем request_callback_answer, не click()
-            await self._client.request_callback_answer(
-                chat_id=current.chat.id,
-                message_id=current.id,
-                callback_data=next_btn.callback_data,
-            )
-            logger.debug("[navigate] callback отправлен  prev_id=%d  ждём ответ...", prev_id)
+            await current.click(next_btn_index)
+            logger.debug("[navigate] click(%d) отправлен  prev_id=%d  ждём ответ...",
+                         next_btn_index, prev_id)
 
             updated = await self._wait_for_reply(
                 prev_id=prev_id,
@@ -495,15 +508,20 @@ class VKMusicBotSource(MusicSource):
 
 # ─── Вспомогательные функции ──────────────────────────────────────────────
 
-def _find_button(msg: Message, text: str):
-    """Находит кнопку по тексту в reply_markup."""
+def _find_button_flat_index(msg: Message, text: str) -> int:
+    """
+    Возвращает плоский индекс (0-based) кнопки с заданным текстом.
+    -1 если не найдена.
+    """
     if not msg.reply_markup:
-        return None
+        return -1
+    idx = 0
     for row in msg.reply_markup.inline_keyboard:
         for btn in row:
             if btn.text == text:
-                return btn
-    return None
+                return idx
+            idx += 1
+    return -1
 
 
 def _make_query_hash(query: str) -> str:
