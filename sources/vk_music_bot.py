@@ -140,10 +140,9 @@ class VKMusicBotSource(MusicSource):
     Алгоритм:
       1. Отправить текстовый запрос боту
       2. Дождаться ответа с inline-кнопками
-      3. Нажать кнопку нужного трека (click callback_data)
+      3. Нажать кнопку нужного трека через request_callback_answer()
       4. Дождаться сообщения с аудио
-      5a. Если target_chat_id задан: userbot пересылает аудио напрямую в чат
-          пользователя (already_sent=True)
+      5a. Если target_chat_id задан: userbot пересылает аудио напрямую в чат (already_sent=True)
       5b. Иначе: возвращаем file_id для пересылки ботом
     """
 
@@ -279,15 +278,22 @@ class VKMusicBotSource(MusicSource):
             logger.error("[get_audio_internal] не найдено сообщение с результатами (limit=5)")
             raise TrackNotFoundError("Не найдено сообщение с результатами поиска")
 
-        logger.debug("[get_audio_internal] нашли search_msg_id=%d", search_msg.id)
+        logger.debug("[get_audio_internal] нашли search_msg_id=%d  chat_id=%s",
+                     search_msg.id, search_msg.chat.id)
 
-        # Запоминаем prev_id ДО клика
+        # Запоминаем prev_id ДО нажатия кнопки
         prev_id = await self._get_last_message_id()
         logger.debug("[get_audio_internal] prev_id=%d  нажимаем callback_data=%r",
                      prev_id, track.source_track_id)
 
-        await search_msg.click(track.source_track_id)
-        logger.debug("[get_audio_internal] клик отправлен  ждём аудио (timeout=%.1fs)",
+        # BUG FIX: message.click(str) ищет кнопку по тексту (не по callback_data).
+        # Используем request_callback_answer() напрямую с callback_data.
+        await self._client.request_callback_answer(
+            chat_id=search_msg.chat.id,
+            message_id=search_msg.id,
+            callback_data=track.source_track_id,
+        )
+        logger.debug("[get_audio_internal] callback отправлен  ждём аудио (timeout=%.1fs)",
                      self.AUDIO_WAIT)
 
         audio_msg = await self._wait_for_audio(prev_id=prev_id, timeout=self.AUDIO_WAIT)
@@ -306,21 +312,15 @@ class VKMusicBotSource(MusicSource):
             audio_msg.id, a.file_id, a.performer, a.title, a.duration or 0, a.file_size or 0,
         )
 
-        # ──────────────────────────────────────────────────────────────────
-        # Если задан target_chat_id — userbot сам пересылает аудио пользователю.
-        # file_id пользовательского аккаунта Telegram нельзя использовать через
-        # aiogram-бот напрямую — файл должен быть реально отправлен через тот же
-        # userbot, который его получил.
-        # ──────────────────────────────────────────────────────────────────
         if target_chat_id:
             logger.info(
                 "[get_audio_internal] пересылаем аудио в чат пользователя  "
                 "target_chat_id=%d  from_chat=%s  msg_id=%d",
-                target_chat_id, self.bot_username, audio_msg.id,
+                target_chat_id, search_msg.chat.id, audio_msg.id,
             )
             sent = await self._client.copy_message(
                 chat_id=target_chat_id,
-                from_chat_id=self.bot_username,
+                from_chat_id=search_msg.chat.id,
                 message_id=audio_msg.id,
             )
             logger.info(
@@ -339,7 +339,6 @@ class VKMusicBotSource(MusicSource):
                 already_sent=True,
             )
 
-        # target_chat_id не задан — просто возвращаем file_id
         return AudioFile(
             telegram_file_id=a.file_id,
             telegram_unique_id=a.file_unique_id,
@@ -375,14 +374,19 @@ class VKMusicBotSource(MusicSource):
 
             next_btn = _find_button(current, "\u27a1\ufe0f")
             if not next_btn:
-                logger.warning("[navigate] кнопка ➡️ не найдена на шаге %d, останавливаемся",
-                               step + 1)
+                logger.warning("[navigate] кнопка ➡️ не найдена на шаге %d", step + 1)
                 break
 
             logger.debug("[navigate] нажимаем ➡️  callback_data=%r", next_btn.callback_data)
             prev_id = await self._get_last_message_id()
-            await current.click(next_btn.callback_data)
-            logger.debug("[navigate] клик отправлен  prev_id=%d  ждём ответ...", prev_id)
+
+            # Также используем request_callback_answer, не click()
+            await self._client.request_callback_answer(
+                chat_id=current.chat.id,
+                message_id=current.id,
+                callback_data=next_btn.callback_data,
+            )
+            logger.debug("[navigate] callback отправлен  prev_id=%d  ждём ответ...", prev_id)
 
             updated = await self._wait_for_reply(
                 prev_id=prev_id,
@@ -393,7 +397,7 @@ class VKMusicBotSource(MusicSource):
                 logger.debug("[navigate] новая страница получена  msg_id=%d", updated.id)
                 current = updated
             else:
-                logger.warning("[navigate] таймаут на шаге %d, останавливаемся", step + 1)
+                logger.warning("[navigate] таймаут на шаге %d", step + 1)
                 break
 
         logger.info("[navigate] закончено  итоговый msg_id=%d", current.id)
