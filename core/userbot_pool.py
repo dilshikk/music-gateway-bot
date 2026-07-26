@@ -33,13 +33,8 @@ class UserbotEntry:
 
     async def acquire(self) -> bool:
         """Попытаться занять userbot. Возвращает True если успешно."""
-        # BUG FIX: the original code checked is_available *before* acquiring the lock,
-        # creating a TOCTOU race condition. Two concurrent callers could both pass the
-        # is_available check and both acquire(). Use try_acquire pattern instead.
         if not self.is_available:
             return False
-        acquired = self._lock.locked() is False and not self._lock.locked()
-        # asyncio.Lock has no try_acquire; use acquire with immediate release on failure
         try:
             await asyncio.wait_for(self._lock.acquire(), timeout=0)
             return True
@@ -61,12 +56,6 @@ class UserbotEntry:
 class UserbotPool:
     """
     Пул Pyrogram userbot-аккаунтов.
-
-    Отвечает за:
-    - запуск / остановку клиентов
-    - выбор свободного аккаунта (Round Robin + weight)
-    - обработку FloodWait с авто-восстановлением
-    - обновление статусов в БД и Redis
     """
 
     def __init__(self, repo: UserbotRepository) -> None:
@@ -133,10 +122,6 @@ class UserbotPool:
     # ── Выбор userbot ─────────────────────────────────────────────────────────
 
     async def acquire_userbot(self) -> UserbotEntry | None:
-        """
-        Выбирает свободный userbot.
-        Стратегия: сортировка по weight (desc) + last_used (asc).
-        """
         candidates = sorted(
             [e for e in self._pool.values() if e.is_available],
             key=lambda e: (-e.model.weight, e.model.last_used or datetime.min),
@@ -163,20 +148,13 @@ class UserbotPool:
         """Ставит userbot в режим FloodWait с авто-восстановлением."""
         entry.release()
         entry.model.status = UserbotStatus.FLOOD_WAIT
-        # BUG FIX: original code reset seconds/microseconds to 0, storing a
-        # slightly incorrect timestamp. Store the exact current UTC time instead.
         entry.model.flood_wait_until = datetime.now(timezone.utc)
         await self._repo.save(entry.model)
-
-        logger.warning(
-            "Userbot #%d FloodWait %ds", entry.id, seconds
-        )
-
-        # Авто-восстановление через asyncio задачу
+        logger.warning("Userbot #%d FloodWait %ds", entry.id, seconds)
         asyncio.create_task(self._recover_after_flood(entry, seconds))
 
     async def _recover_after_flood(self, entry: UserbotEntry, seconds: int) -> None:
-        await asyncio.sleep(seconds + 5)  # +5 сек буфер
+        await asyncio.sleep(seconds + 5)
         entry.model.status = UserbotStatus.IDLE
         entry.model.flood_wait_until = None
         await self._repo.save(entry.model)
@@ -193,17 +171,31 @@ class UserbotPool:
         return entry is not None
 
     async def remove_userbot(self, userbot_id: int) -> None:
+        """Останавливает клиента и УДАЛЯЕТ запись из БД полностью."""
         entry = self._pool.pop(userbot_id, None)
         if entry:
             try:
                 await entry.client.stop()
             except Exception:
                 pass
-            await self._repo.set_status(userbot_id, UserbotStatus.DISABLED)
+        # BUG FIX: was only setting status=DISABLED, leaving the record in DB.
+        # This caused get_by_phone() to find the "deleted" record and block re-adding.
+        # Now we do a real DELETE so the phone becomes available again.
+        await self._repo.delete(userbot_id)
+        logger.info("Userbot #%d удалён из БД", userbot_id)
 
     async def restart_userbot(self, userbot_id: int) -> bool:
-        await self.remove_userbot(userbot_id)
-        return await self.add_userbot(userbot_id)
+        # For restart we need the model before removing, so fetch it first
+        model = await self._repo.get_by_id(userbot_id)
+        if not model:
+            return False
+        entry = self._pool.pop(userbot_id, None)
+        if entry:
+            try:
+                await entry.client.stop()
+            except Exception:
+                pass
+        return await self._start_userbot(model) is not None
 
     async def disable_userbot(self, userbot_id: int) -> None:
         entry = self._pool.get(userbot_id)
