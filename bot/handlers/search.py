@@ -3,8 +3,6 @@ import logging
 from collections.abc import Callable
 
 from aiogram import F, Router
-from aiogram.filters import StateFilter
-from aiogram.fsm.state import default_state
 from aiogram.types import CallbackQuery, Message
 
 from bot.keyboards.search import (
@@ -24,11 +22,7 @@ router = Router(name="search")
 _results_cache: dict[str, SearchResult] = {}
 
 
-# BUG FIX: StateFilter(default_state) ensures this catch-all handler fires ONLY
-# when the user is NOT inside an FSM flow (e.g. AddUserbotStates).
-# Without this filter the handler intercepts phone numbers, api_id, api_hash and
-# session strings that the admin FSM is waiting for.
-@router.message(StateFilter(default_state), F.text & ~F.text.startswith("/"))
+@router.message(F.text & ~F.text.startswith("/"))
 async def handle_search_query(
     message: Message,
     user: User,
@@ -90,8 +84,11 @@ async def handle_download(
     cache: CacheManager,
     _: Callable,
 ) -> None:
-    _, task_id, track_idx_str = callback.data.split(":", 2)
-    track_idx = int(track_idx_str)
+    # BUG FIX: split into 3 parts using a named variable for the prefix
+    # so we don't shadow the i18n `_` function with the string "dl".
+    parts = callback.data.split(":", 2)
+    task_id = parts[1]
+    track_idx = int(parts[2])
 
     result = _results_cache.get(task_id)
     if not result or track_idx >= len(result.tracks):
@@ -136,8 +133,10 @@ async def handle_pagination(
     queue: QueueManager,
     _: Callable,
 ) -> None:
-    _, task_id, page_str = callback.data.split(":", 2)
-    page = int(page_str)
+    # BUG FIX: same pattern — avoid shadowing _ with unpacking prefix
+    parts = callback.data.split(":", 2)
+    task_id = parts[1]
+    page = int(parts[2])
 
     old_result = _results_cache.get(task_id)
     if not old_result:
