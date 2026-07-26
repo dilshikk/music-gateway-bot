@@ -49,28 +49,25 @@ class SearchManager:
         registry: SourceRegistry,
         cache: CacheManager,
     ) -> None:
-        self._pool     = pool
+        self._pool = pool
         self._registry = registry
-        self._cache    = cache
+        self._cache = cache
 
     # ── Поиск треков ──────────────────────────────────────────────────────────
 
     async def search(self, ctx: SearchContext) -> SearchResult:
-        # 1. Кэш
         cached = await self._cache.get_search(ctx.query)
         if cached:
             logger.debug("Cache hit: %r", ctx.query)
             await self._cache.increment_popular(ctx.query)
             return cached
 
-        # 2. Получить источники (с учётом preferred_source)
         sources = self._get_sources(ctx.preferred_source)
         if not sources:
             raise SourceUnavailableError("Нет доступных источников")
 
         last_error: Exception | None = None
 
-        # 3. Fallback-цепочка по источникам
         for source in sources:
             try:
                 result = await self._search_with_retry(source, ctx)
@@ -96,7 +93,6 @@ class SearchManager:
         source: MusicSource,
         ctx: SearchContext,
     ) -> SearchResult:
-        """Выполняет поиск с retry через разные userbots."""
         for attempt in range(self.MAX_RETRIES):
             userbot = await self._pool.acquire_userbot()
             if not userbot:
@@ -113,7 +109,6 @@ class SearchManager:
 
             except SourceFloodWaitError as e:
                 await self._pool.handle_flood_wait(userbot, e.seconds)
-                # Не освобождаем — userbot сам восстановится
                 continue
 
             except Exception:
@@ -130,7 +125,6 @@ class SearchManager:
     ) -> SearchResult:
         start = time.monotonic()
         try:
-            # Передаём клиент userbot в источник (duck typing)
             if hasattr(source, "_client"):
                 source._client = userbot.client  # type: ignore[attr-defined]
 
@@ -149,11 +143,29 @@ class SearchManager:
         finally:
             await self._pool.release_userbot(userbot)
 
-    # ── Получение аудио ───────────────────────────────────────────────────────
+    # ── Получение / доставка аудио ────────────────────────────────────────────
 
-    async def get_audio(self, track: Track, user_id: int) -> AudioFile:
-        # Проверяем кэш file_id
-        if track.source_track_id:
+    async def get_audio(
+        self,
+        track: Track,
+        user_id: int,
+        target_chat_id: int | None = None,
+    ) -> AudioFile:
+        """
+        Получает аудио для трека.
+
+        Args:
+            track: трек для получения аудио.
+            user_id: ID пользователя (для кэша).
+            target_chat_id: если передан, userbot доставляет аудио напрямую
+                в этот чат (copy_message).  AudioFile.delivered будет True,
+                и вызывающий код НЕ должен звать answer_audio.
+
+        BUG FIX: file_id из Pyrogram-сессии не принимается главным ботом.
+        Передавайте target_chat_id чтобы userbot доставил аудио напрямую.
+        """
+        # Проверяем кэш (только если не нужна прямая доставка)
+        if track.source_track_id and target_chat_id is None:
             cached = await self._cache.get_audio(track.source_track_id)
             if cached:
                 logger.debug("Audio cache hit: %r", track.title)
@@ -171,11 +183,13 @@ class SearchManager:
                 if hasattr(source, "_client"):
                     source._client = userbot.client  # type: ignore[attr-defined]
 
-                audio = await source.get_audio(track)
+                audio = await source.get_audio(track, target_chat_id=target_chat_id)
                 await self._pool.release_userbot(userbot)
 
-                # Кэшируем file_id
-                await self._cache.set_audio(audio)
+                # Кэшируем только если не было прямой доставки
+                # (file_id userbot-сессии не валиден для главного бота)
+                if not audio.delivered:
+                    await self._cache.set_audio(audio)
                 return audio
 
             except SourceFloodWaitError as e:
@@ -198,7 +212,6 @@ class SearchManager:
         available = self._registry.get_available()
         if not preferred:
             return available
-        # Предпочитаемый источник первым
         preferred_src = [s for s in available if s.name == preferred]
-        rest          = [s for s in available if s.name != preferred]
+        rest = [s for s in available if s.name != preferred]
         return preferred_src + rest
