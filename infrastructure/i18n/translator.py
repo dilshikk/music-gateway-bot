@@ -1,6 +1,8 @@
 """
 i18n движок на базе python-fluent.
 Фикс БАГ 4: FluentBundle из fluent.runtime, FluentParser из fluent.syntax.
+Фикс БАГ 18: add_resource() в fluent.runtime 0.4 возвращает None,
+             а не список ошибок — обернуть в `or []`.
 """
 import logging
 from pathlib import Path
@@ -38,7 +40,8 @@ class Translator:
 
             bundle = FluentBundle([lang.value])
             ast    = _parser.parse(ftl_path.read_text(encoding="utf-8"))
-            errors = bundle.add_resource(ast)
+            # fluent.runtime 0.4 returns None from add_resource() instead of a list
+            errors = bundle.add_resource(ast) or []
 
             for err in errors:
                 logger.warning("Fluent error in %s: %s", ftl_path.name, err)
