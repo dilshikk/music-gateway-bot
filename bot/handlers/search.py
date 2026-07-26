@@ -6,6 +6,7 @@ from aiogram import F, Router
 from aiogram.filters import StateFilter
 from aiogram.fsm.state import default_state
 from aiogram.types import CallbackQuery, Message
+from aiogram.exceptions import TelegramBadRequest
 
 from bot.keyboards.search import (
     build_downloading_keyboard,
@@ -52,7 +53,7 @@ async def handle_search_query(
         return
 
     wait_msg = await message.answer(_("search-processing"))
-    print(f"[search] sent wait_msg")
+    print("[search] sent wait_msg")
 
     ctx = SearchContext(query=query, user_id=user.id, page=1)
 
@@ -127,7 +128,7 @@ async def handle_download(
     print(f"[search] session for user_id={user.id}: result={'found' if result else 'None'}")
 
     if not result or track_idx >= len(result.tracks):
-        print(f"[search] result not found or stale")
+        print("[search] result not found or stale")
         await callback.answer(_("download-results-stale"), show_alert=True)
         return
 
@@ -151,12 +152,12 @@ async def handle_download(
 
         if audio.already_sent:
             # relay.py уже отправил аудио пользователю через группу — ничего не делаем
-            print(f"[search] already_sent=True — relay.py перешлёт пользователю, пропускаем send_audio")
+            print("[search] already_sent=True — relay.py перешлёт пользователю, пропускаем send_audio")
         else:
             # Fallback: LOG_GROUP_ID не настроен — отправляем напрямую
             # ВНИМАНИЕ: file_id от Pyrogram не работает в Bot API.
             # Этот путь работает только если file_id получен через Bot API (кэш и т.п.)
-            print(f"[search] already_sent=False — отправляем напрямую (fallback, LOG_GROUP_ID не настроен)")
+            print("[search] already_sent=False — отправляем напрямую (fallback, LOG_GROUP_ID не настроен)")
             await callback.message.answer_audio(
                 audio=audio.telegram_file_id,
                 title=audio.title,
@@ -167,7 +168,13 @@ async def handle_download(
             print("[search] audio sent directly")
 
         keyboard = build_search_results_keyboard(result, task_id)
-        await callback.message.edit_reply_markup(reply_markup=keyboard)
+        try:
+            await callback.message.edit_reply_markup(reply_markup=keyboard)
+        except TelegramBadRequest as e:
+            if "message is not modified" in str(e):
+                print("[search] keyboard not modified — ignoring")
+            else:
+                raise
 
         from infrastructure.database.repositories.user_repo import UserRepository
         from infrastructure.database.session import async_session_factory
@@ -179,7 +186,10 @@ async def handle_download(
         print(f"[search] Exception in handle_download: {e}")
         logger.error("Ошибка скачивания трека: %s", e)
         keyboard = build_search_results_keyboard(result, task_id)
-        await callback.message.edit_reply_markup(reply_markup=keyboard)
+        try:
+            await callback.message.edit_reply_markup(reply_markup=keyboard)
+        except TelegramBadRequest:
+            pass
         await callback.answer(_("download-error"), show_alert=True)
 
 
@@ -218,8 +228,18 @@ async def handle_pagination(
         print(f"[search] updated session for user_id={user.id}")
 
         keyboard = build_search_results_keyboard(result, task_id)
-        await callback.message.edit_reply_markup(reply_markup=keyboard)
+        try:
+            await callback.message.edit_reply_markup(reply_markup=keyboard)
+        except TelegramBadRequest as e:
+            if "message is not modified" in str(e):
+                # Страница 2 вернула те же треки — просто игнорируем
+                print("[search] pagination keyboard not modified — same content, ignoring")
+            else:
+                raise
 
+    except TelegramBadRequest:
+        # Уже обработано выше
+        pass
     except Exception as e:
         print(f"[search] Exception in handle_pagination: {e}")
         logger.error("Ошибка пагинации: %s", e)
