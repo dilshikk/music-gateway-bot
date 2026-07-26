@@ -84,10 +84,9 @@ async def handle_download(
     cache: CacheManager,
     _: Callable,
 ) -> None:
-    # BUG FIX: split into 3 parts using a named variable for the prefix
-    # so we don't shadow the i18n `_` function with the string "dl".
+    # BUG FIX: avoid shadowing the i18n `_` function with tuple-unpacking prefix
     parts = callback.data.split(":", 2)
-    task_id = parts[1]
+    task_id   = parts[1]
     track_idx = int(parts[2])
 
     result = _results_cache.get(task_id)
@@ -101,15 +100,25 @@ async def handle_download(
     await callback.answer()
 
     try:
-        audio = await search_manager.get_audio(track, user.id)
-
-        await callback.message.answer_audio(
-            audio=audio.telegram_file_id,
-            title=audio.title,
-            performer=audio.artist,
-            duration=audio.duration,
-            caption=_("download-caption", artist=audio.artist, title=audio.title),
+        # BUG FIX: передаём chat_id пользователя — userbot доставит аудио
+        # напрямую через copy_message.  file_id из Pyrogram-сессии не работает
+        # при отправке через главный бот (разные сессии/токены).
+        target_chat_id = callback.message.chat.id
+        audio = await search_manager.get_audio(
+            track, user.id, target_chat_id=target_chat_id
         )
+
+        if not audio.delivered:
+            # Запасной путь: если источник не выполнил прямую доставку
+            # (например, CustomMusicSource возвращает настоящий file_id),
+            # отправляем через главный бот как обычно.
+            await callback.message.answer_audio(
+                audio=audio.telegram_file_id,
+                title=audio.title,
+                performer=audio.artist,
+                duration=audio.duration,
+                caption=_("download-caption", artist=audio.artist, title=audio.title),
+            )
 
         keyboard = build_search_results_keyboard(result, task_id)
         await callback.message.edit_reply_markup(reply_markup=keyboard)
@@ -133,10 +142,9 @@ async def handle_pagination(
     queue: QueueManager,
     _: Callable,
 ) -> None:
-    # BUG FIX: same pattern — avoid shadowing _ with unpacking prefix
-    parts = callback.data.split(":", 2)
+    parts   = callback.data.split(":", 2)
     task_id = parts[1]
-    page = int(parts[2])
+    page    = int(parts[2])
 
     old_result = _results_cache.get(task_id)
     if not old_result:
