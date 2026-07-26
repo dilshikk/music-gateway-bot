@@ -20,11 +20,8 @@ from sources.base import SearchResult
 logger = logging.getLogger(__name__)
 router = Router(name="search")
 
-# Пример структуры для хранения сессий поиска в памяти бэкенда/бота
-# { user_id: { "search_results": SearchResult|None, "active_source": str|None, "current_query": str } }
-# Когда пользователь А делает запрос — он получает свою сессию.
-# Когда пользователь Б делает запрос — он получает свою сессию.
-# Они никак не пересекаются.
+# { user_id: { "search_results": SearchResult|None, "current_query": str } }
+# Каждый пользователь имеет изолированную сессию — результаты не пересекаются.
 _user_sessions: dict[int, dict] = {}
 
 
@@ -47,15 +44,15 @@ async def handle_search_query(
     _: Callable,
 ) -> None:
     query = message.text.strip()
-    print(f"[search] handle_search_query: user_id={user.id} query={query!r}")
+    print(f"[search] handle_search_query: user_id={user.id} telegram_id={message.from_user.id} query={query!r}")
 
     if not query or len(query) < 2:
-        print(f"[search] query too short, answering search-too-short")
+        print("[search] query too short")
         await message.answer(_("search-too-short"))
         return
 
     wait_msg = await message.answer(_("search-processing"))
-    print(f"[search] sent wait_msg: {_('search-processing')!r}")
+    print(f"[search] sent wait_msg")
 
     ctx = SearchContext(query=query, user_id=user.id, page=1)
 
@@ -67,7 +64,7 @@ async def handle_search_query(
 
         if pos and pos > 1:
             text = _("search-queue-position", position=pos, query=query)
-            print(f"[search] editing wait_msg to queue position: {text!r}")
+            print(f"[search] queue position text: {text!r}")
             await wait_msg.edit_text(text)
 
         result = await queue.wait_for_result(task)
@@ -78,11 +75,11 @@ async def handle_search_query(
         await wait_msg.edit_text(f"⏳ {e}")
         return
     except asyncio.TimeoutError:
-        print(f"[search] TimeoutError — answering search-timeout")
+        print("[search] TimeoutError")
         await wait_msg.edit_text(_("search-timeout"))
         return
     except OverflowError:
-        print(f"[search] OverflowError — answering search-queue-full")
+        print("[search] OverflowError — queue full")
         await wait_msg.edit_text(_("search-queue-full"))
         return
     except Exception as e:
@@ -96,16 +93,15 @@ async def handle_search_query(
         await wait_msg.edit_text(_("search-not-found", query=query))
         return
 
-    # Сохраняем результаты в сессию пользователя — изолированно от других
     session = _get_user_session(user.id)
     session["search_results"] = result
     session["current_query"] = query
-    print(f"[search] saved to user session: user_id={user.id} tracks={len(result.tracks)}")
-    print(f"[search] _user_sessions keys: {list(_user_sessions.keys())}")
+    print(f"[search] saved to session: user_id={user.id} tracks={len(result.tracks)}")
+    print(f"[search] active sessions: {list(_user_sessions.keys())}")
 
     keyboard = build_search_results_keyboard(result, task.task_id)
     header = _("search-results-header", query=query, total=result.total)
-    print(f"[search] sending results: {header!r}")
+    print(f"[search] sending results header: {header!r}")
     await wait_msg.edit_text(header, reply_markup=keyboard)
 
 
@@ -117,18 +113,21 @@ async def handle_download(
     cache: CacheManager,
     _: Callable,
 ) -> None:
-    print(f"[search] handle_download: callback.data={callback.data!r} user_id={user.id}")
+    # Telegram chat_id пользователя — именно его нужно передать в get_audio
+    # чтобы userbot переслал аудио в группу с caption="user:{telegram_chat_id}"
+    telegram_chat_id = callback.from_user.id
+
+    print(f"[search] handle_download: callback.data={callback.data!r} user_id={user.id} telegram_chat_id={telegram_chat_id}")
     _cb, task_id, track_idx_str = callback.data.split(":", 2)
     track_idx = int(track_idx_str)
     print(f"[search] task_id={task_id} track_idx={track_idx}")
 
-    # Берём результаты из сессии конкретного пользователя
     session = _get_user_session(user.id)
     result: SearchResult | None = session.get("search_results")
     print(f"[search] session for user_id={user.id}: result={'found' if result else 'None'}")
 
     if not result or track_idx >= len(result.tracks):
-        print(f"[search] result not found or stale: result={result}")
+        print(f"[search] result not found or stale")
         await callback.answer(_("download-results-stale"), show_alert=True)
         return
 
@@ -139,19 +138,33 @@ async def handle_download(
     await callback.answer()
 
     try:
-        print(f"[search] calling get_audio: track={track.title!r} target_chat_id={callback.from_user.id}")
-        audio = await search_manager.get_audio(track, user.id)
+        # ВАЖНО: передаём telegram_chat_id (не user.id из БД!)
+        # Именно этот ID попадёт в caption="user:{telegram_chat_id}" в группе,
+        # и relay.py отправит аудио в правильный чат.
+        print(f"[search] calling get_audio: track={track.title!r} target_chat_id={telegram_chat_id}")
+        audio = await search_manager.get_audio(
+            track,
+            user.id,
+            target_chat_id=telegram_chat_id,
+        )
         print(f"[search] got audio: file_id={audio.telegram_file_id!r} already_sent={audio.already_sent}")
 
-        print(f"[search] sending audio to chat")
-        await callback.message.answer_audio(
-            audio=audio.telegram_file_id,
-            title=audio.title,
-            performer=audio.artist,
-            duration=audio.duration,
-            caption=_("download-caption", artist=audio.artist, title=audio.title),
-        )
-        print(f"[search] audio sent successfully")
+        if audio.already_sent:
+            # relay.py уже отправил аудио пользователю через группу — ничего не делаем
+            print(f"[search] already_sent=True — relay.py перешлёт пользователю, пропускаем send_audio")
+        else:
+            # Fallback: LOG_GROUP_ID не настроен — отправляем напрямую
+            # ВНИМАНИЕ: file_id от Pyrogram не работает в Bot API.
+            # Этот путь работает только если file_id получен через Bot API (кэш и т.п.)
+            print(f"[search] already_sent=False — отправляем напрямую (fallback, LOG_GROUP_ID не настроен)")
+            await callback.message.answer_audio(
+                audio=audio.telegram_file_id,
+                title=audio.title,
+                performer=audio.artist,
+                duration=audio.duration,
+                caption=_("download-caption", artist=audio.artist, title=audio.title),
+            )
+            print("[search] audio sent directly")
 
         keyboard = build_search_results_keyboard(result, task_id)
         await callback.message.edit_reply_markup(reply_markup=keyboard)
@@ -182,13 +195,12 @@ async def handle_pagination(
     page = int(page_str)
     print(f"[search] task_id={task_id} page={page}")
 
-    # Берём текущий запрос из сессии пользователя
     session = _get_user_session(user.id)
     old_result: SearchResult | None = session.get("search_results")
     print(f"[search] session for user_id={user.id}: result={'found' if old_result else 'None'}")
 
     if not old_result:
-        print(f"[search] old_result not found, stale")
+        print("[search] old_result not found, stale")
         await callback.answer(_("download-results-stale"), show_alert=True)
         return
 
@@ -202,7 +214,6 @@ async def handle_pagination(
         result = await queue.wait_for_result(task)
         print(f"[search] pagination result: tracks={len(result.tracks)} total={result.total}")
 
-        # Обновляем сессию пользователя
         session["search_results"] = result
         print(f"[search] updated session for user_id={user.id}")
 
