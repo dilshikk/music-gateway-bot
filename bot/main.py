@@ -1,6 +1,17 @@
 import asyncio
 import logging
 
+# BUG FIX: pyrogram 2.0.106 calls asyncio.get_event_loop() at import time
+# inside sync.py. If uvloop has replaced the event loop policy before an event
+# loop is created, this raises RuntimeError. We must set a default event loop
+# BEFORE any pyrogram import happens so that get_event_loop() succeeds.
+# This must be at the very top of the entry point, before all other imports.
+try:
+    asyncio.get_event_loop()
+except RuntimeError:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -25,8 +36,6 @@ from bot.handlers import inline, inline_download, inline_feedback
 from bot.middlewares.i18n import I18nMiddleware
 from bot.handlers import settings as settings_handler, favorites, popular
 
-# Настройка логирования выполняется здесь, до asyncio.run(),
-# чтобы LOG_LEVEL был доступен из уже загруженного settings
 logging.basicConfig(
     level=settings.LOG_LEVEL,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -41,8 +50,6 @@ async def main() -> None:
     cache = CacheManager(redis)
 
     # ── БД + компоненты ───────────────────────────────────────────────────────
-    # BUG FIX: session must stay open for the entire app lifetime.
-    # We manage it manually with __aenter__/__aexit__ in the outer finally.
     db_session = async_session_factory()
     await db_session.__aenter__()
 
@@ -105,7 +112,4 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    # BUG FIX: uvloop (если установлен) переопределяет get_event_loop() и бросает
-    # RuntimeError до asyncio.run(). Не используем uvloop.install() явно —
-    # aiogram сам подхватит uvloop если он установлен через asyncio.run().
     asyncio.run(main())
