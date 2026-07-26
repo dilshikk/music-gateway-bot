@@ -111,22 +111,16 @@ async def handle_download(
     await callback.answer()
 
     try:
-        # Не передаём target_chat_id — userbot только получает file_id,
-        # а аудио отправляется пользователю через самого бота (ниже).
+        # Передаём target_chat_id — userbot отправит аудио боту с пометкой,
+        # relay-хендлер бота автоматически перешлёт пользователю.
         audio = await search_manager.get_audio(
             track,
             user.id,
-            target_chat_id=None,
+            target_chat_id=callback.from_user.id,
         )
 
-        # Всегда отправляем аудио через бота в чат бот↔пользователь
-        await callback.message.answer_audio(
-            audio=audio.telegram_file_id,
-            title=audio.title,
-            performer=audio.artist,
-            duration=audio.duration,
-            caption=_("download-caption", artist=audio.artist, title=audio.title),
-        )
+        # audio.already_sent=True — relay-хендлер уже отправил пользователю.
+        # Ничего дополнительно отправлять не нужно.
 
         keyboard = build_search_results_keyboard(result, task_id)
         await _safe_edit_reply_markup(callback, keyboard)

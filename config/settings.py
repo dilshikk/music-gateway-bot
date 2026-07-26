@@ -83,7 +83,6 @@ class Settings(BaseSettings):
     DEBUG: bool = False
 
     # Logging
-    # BUG FIX: LOG_LEVEL was used in main.py but missing from Settings.
     LOG_LEVEL: str = "INFO"
 
     @property

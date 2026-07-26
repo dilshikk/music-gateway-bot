@@ -8,9 +8,11 @@ from aiogram.fsm.storage.redis import RedisStorage
 from redis.asyncio import Redis
 
 from bot.handlers import admin, search, start, subscription
+from bot.handlers import relay
 from bot.middlewares.auth import AuthMiddleware
 from bot.middlewares.rate_limit import RateLimitMiddleware
 from bot.middlewares.subscription import SubscriptionMiddleware
+from bot.middlewares.i18n import I18nMiddleware
 from bot.middlewares.throttle import ThrottleMiddleware
 from config.settings import settings
 from core.cache_manager import CacheManager
@@ -22,7 +24,6 @@ from infrastructure.database.session import async_session_factory
 from sources.registry import SourceRegistry
 from sources.vk_music_bot import VKMusicBotSource
 from bot.handlers import inline, inline_download, inline_feedback
-from bot.middlewares.i18n import I18nMiddleware
 from bot.handlers import settings as settings_handler, favorites, popular
 
 logging.basicConfig(
@@ -33,20 +34,31 @@ logger = logging.getLogger(__name__)
 
 
 async def main() -> None:
-    # ── Redis ──────────────────────────────────────────────────────────────────
+    # ── Redis ────────────────────────────────────────────────────────────────────
     redis = Redis.from_url(settings.redis_url, decode_responses=False)
     storage = RedisStorage(redis=redis)
     cache = CacheManager(redis)
 
     # ── Репозиторий использует фабрику сессий (session-per-operation) ─────────
-    # BUG FIX: передаём session_factory, а не одну сессию.
-    # Ранее сессия закрывалась сразу после блока `async with`, пул стартовал
-    # с уже закрытой сессией → все методы repo падали → пул оставался пустым.
     repo = UserbotRepository(session_factory=async_session_factory)
     pool = UserbotPool(repo)
 
+    # ── Bot (create early to get bot ID) ─────────────────────────────────────
+    bot = Bot(
+        token=settings.BOT_TOKEN,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
+    bot_info = await bot.get_me()
+    bot_id = bot_info.id
+    logger.info("Бот @%s (id=%d)", bot_info.username, bot_id)
+
+    # ── Источники ──────────────────────────────────────────────────────────────
     registry = SourceRegistry()
-    registry.register(VKMusicBotSource(client=None, priority=10))  # type: ignore[arg-type]
+    registry.register(VKMusicBotSource(
+        client=None,  # type: ignore[arg-type]
+        priority=10,
+        relay_bot_id=bot_id,
+    ))
 
     search_manager = SearchManager(pool=pool, registry=registry, cache=cache)
     queue = QueueManager(search_manager=search_manager, cache=cache)
@@ -54,11 +66,18 @@ async def main() -> None:
     await pool.start()
     await queue.start()
 
-    # ── Bot + Dispatcher ──────────────────────────────────────────────────────
-    bot = Bot(
-        token=settings.BOT_TOKEN,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-    )
+    # Регистрируем ID userbot-ов для relay-хендлера
+    userbot_ids = set()
+    for entry in pool.list_userbots():
+        # Получаем Telegram ID аккаунта userbot
+        try:
+            me = await entry.client.get_me()
+            userbot_ids.add(me.id)
+        except Exception as e:
+            logger.warning("Не удалось получить ID userbot #%d: %s", entry.id, e)
+    relay.register_userbot_ids(userbot_ids)
+
+    # ── Dispatcher ─────────────────────────────────────────────────────────────
     dp = Dispatcher(storage=storage)
 
     # Передаём зависимости через workflow_data
@@ -76,6 +95,9 @@ async def main() -> None:
     dp.callback_query.middleware(I18nMiddleware())
 
     # ── Роутеры ───────────────────────────────────────────────────────────────
+    # IMPORTANT: relay должен быть ПЕРВЫМ, чтобы перехватить аудио от userbot
+    # до того, как AuthMiddleware попытается зарегистрировать userbot как пользователя.
+    dp.include_router(relay.router)
     dp.include_router(start.router)
     dp.include_router(search.router)
     dp.include_router(subscription.router)

@@ -149,8 +149,8 @@ class VKMusicBotSource(MusicSource):
       2. Дождаться ответа с inline-кнопками
       3. Нажать кнопку нужного трека через click(плоской_индекс)
       4. Дождаться сообщения с аудио
-      5a. Если target_chat_id задан: userbot пересылает аудио напрямую (already_sent=True)
-      5b. Иначе: возвращаем file_id для пересылки ботом
+      5. Userbot пересылает аудио основному боту с пометкой target_chat_id
+      6. Основной бот получает свой file_id и отправляет пользователю
     """
 
     name         = "VK Music Bot"
@@ -167,9 +167,12 @@ class VKMusicBotSource(MusicSource):
         priority: int = 1,
         timeout: int = 30,
         enabled: bool = True,
+        relay_bot_id: int | None = None,
     ) -> None:
         super().__init__(priority=priority, timeout=timeout, enabled=enabled)
         self._client = client
+        # ID основного бота, которому userbot отправляет аудио
+        self._relay_bot_id = relay_bot_id
 
     # ── Поиск ───────────────────────────────────────────────────────────────────────
 
@@ -317,9 +320,6 @@ class VKMusicBotSource(MusicSource):
             prev_id, btn_index,
         )
 
-        # BUG FIX: click(str) ищет по тексту кнопки, request_callback_answer требует
-        # расшифрованные данные и даёт DATA_INVALID.
-        # click(int) нажимает по плоскому индексу в клавиатуре — работает всегда.
         await search_msg.click(btn_index)
         logger.debug("[get_audio_internal] click(%d) отправлен  ждём аудио (timeout=%.1fs)",
                      btn_index, self.AUDIO_WAIT)
@@ -340,33 +340,32 @@ class VKMusicBotSource(MusicSource):
             audio_msg.id, a.file_id, a.performer, a.title, a.duration or 0, a.file_size or 0,
         )
 
-        if target_chat_id:
+        # Пересылаем аудио основному боту с пометкой target_chat_id в caption.
+        # Бот получит свой собственный file_id и отправит пользователю.
+        if self._relay_bot_id and target_chat_id:
+            caption = f"target:{target_chat_id}"
             logger.info(
-                "[get_audio_internal] пересылаем аудио в чат пользователя  "
-                "target_chat_id=%d  from_chat=%s  msg_id=%d",
-                target_chat_id, self.bot_username, audio_msg.id,
+                "[get_audio_internal] отправляем аудио основному боту (id=%d)  "
+                "caption=%r  audio_file_id=%r",
+                self._relay_bot_id, caption, a.file_id,
             )
-            sent = await self._client.copy_message(
-                chat_id=target_chat_id,
-                from_chat_id=self.bot_username,
-                message_id=audio_msg.id,
+            await self._client.send_audio(
+                chat_id=self._relay_bot_id,
+                audio=a.file_id,
+                caption=caption,
             )
-            logger.info(
-                "[get_audio_internal] аудио отправлено пользователю  "
-                "sent_msg_id=%d  target_chat_id=%d",
-                sent.id, target_chat_id,
-            )
-            sent_audio = sent.audio
+            # already_sent=True — relay-хендлер бота отправит пользователю
             return AudioFile(
-                telegram_file_id=sent_audio.file_id if sent_audio else a.file_id,
-                telegram_unique_id=sent_audio.file_unique_id if sent_audio else a.file_unique_id,
-                title=sent_audio.title if sent_audio else (a.title or track.title),
-                artist=sent_audio.performer if sent_audio else (a.performer or track.artist),
-                duration=sent_audio.duration if sent_audio else (a.duration or track.duration),
-                size=sent_audio.file_size if sent_audio else (a.file_size or track.size),
+                telegram_file_id=a.file_id,
+                telegram_unique_id=a.file_unique_id,
+                title=a.title or track.title,
+                artist=a.performer or track.artist,
+                duration=a.duration or track.duration,
+                size=a.file_size or track.size,
                 already_sent=True,
             )
 
+        # Fallback: если relay_bot_id не настроен — возвращаем file_id как есть
         return AudioFile(
             telegram_file_id=a.file_id,
             telegram_unique_id=a.file_unique_id,
