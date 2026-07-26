@@ -65,9 +65,15 @@ async def create_components() -> tuple[UserbotPool, QueueManager, CacheManager]:
         )
     logger.info("Redis: подключено (%s)", settings.redis_url)
 
-    async with async_session_factory() as session:
-        repo = UserbotRepository(session)
-        pool = UserbotPool(repo)
+    # BUG FIX: Раньше здесь было `async with async_session_factory() as session:`,
+    # что закрывало сессию сразу после создания репозитория — до pool.start().
+    # Все последующие вызовы repo.get_all(), repo.save() падали с "Session is closed",
+    # пул стартовал пустым, и userbot не находился → "Нет свободных userbots".
+    #
+    # Исправление: передаём ФАБРИКУ сессий, а не готовую сессию.
+    # UserbotRepository теперь сам открывает и закрывает сессию на каждую операцию.
+    repo = UserbotRepository(session_factory=async_session_factory)
+    pool = UserbotPool(repo)
 
     registry = SourceRegistry()
 
@@ -123,7 +129,7 @@ async def _health_check_loop(
     while True:
         await asyncio.sleep(interval)
         try:
-            stats   = queue.get_stats()
+            stats    = queue.get_stats()
             redis_ok = await cache.ping()
             logger.info(
                 "Health | redis=%s queue_size=%d workers=%d "
