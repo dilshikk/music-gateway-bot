@@ -14,12 +14,12 @@ class CacheManager:
     Все операции с Redis-кэшем в одном месте.
 
     Ключи:
-        search:{hash}           — SearchResult (список треков)
-        file:{unique_id}        — AudioFile (file_id для пересылки)
-        user:{id}:rate:{window} — sliding window rate limit
-        user:{id}:history       — история поиска (sorted set)
-        popular:queries         — топ запросов (sorted set)
-        userbot:{id}:status     — статус userbot в реальном времени
+      search:{hash}          — SearchResult (список треков)
+      file:{unique_id}       — AudioFile (file_id для пересылки)
+      user:{id}:rate:{window} — sliding window rate limit
+      user:{id}:history      — история поиска (sorted set)
+      popular:queries        — топ запросов (sorted set)
+      userbot:{id}:status    — статус userbot в реальном времени
     """
 
     def __init__(self, redis: Redis) -> None:
@@ -66,10 +66,11 @@ class CacheManager:
 
     async def set_audio(self, audio: AudioFile) -> None:
         key = f"file:{audio.telegram_unique_id}"
+        # BUG FIX: settings.CACHE_FILE_TTL does not exist; use CACHE_AUDIO_TTL
         await self._redis.set(
             key,
             json.dumps(asdict(audio)),
-            ex=settings.CACHE_FILE_TTL,
+            ex=settings.CACHE_AUDIO_TTL,
         )
 
     # ── Rate Limit (универсальный sliding window) ─────────────────────────────
@@ -83,12 +84,6 @@ class CacheManager:
     ) -> tuple[bool, int]:
         """
         Sliding window rate limit.
-
-        Args:
-            user_id:      Telegram user id
-            max_requests: максимум запросов за window секунд
-            window:       размер окна в секундах
-            key_suffix:   суффикс ключа, например ":inline"
 
         Returns:
             (allowed, retry_after_seconds)
@@ -112,7 +107,6 @@ class CacheManager:
         key = f"user:{user_id}:history"
         score = time.time()
         await self._redis.zadd(key, {query: score})
-        # Храним последние 50 запросов
         await self._redis.zremrangebyrank(key, 0, -51)
         await self._redis.expire(key, 60 * 60 * 24 * 30)  # 30 дней
 
