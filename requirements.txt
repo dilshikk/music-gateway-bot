@@ -11,7 +11,7 @@ psycopg2-binary==2.9.10
 aiosqlite==0.20.0
 
 # Redis
-redis==5.2.0
+redis==8.0.1
 
 # API
 fastapi==0.115.5
