@@ -25,6 +25,8 @@ from bot.handlers import inline, inline_download, inline_feedback
 from bot.middlewares.i18n import I18nMiddleware
 from bot.handlers import settings as settings_handler, favorites, popular
 
+# Настройка логирования выполняется здесь, до asyncio.run(),
+# чтобы LOG_LEVEL был доступен из уже загруженного settings
 logging.basicConfig(
     level=settings.LOG_LEVEL,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -34,28 +36,24 @@ logger = logging.getLogger(__name__)
 
 async def main() -> None:
     # ── Redis ──────────────────────────────────────────────────────────────────
-    redis   = Redis.from_url(settings.redis_url, decode_responses=False)
+    redis = Redis.from_url(settings.REDIS_URL, decode_responses=False)
     storage = RedisStorage(redis=redis)
-    cache   = CacheManager(redis)
+    cache = CacheManager(redis)
 
     # ── БД + компоненты ───────────────────────────────────────────────────────
-    # BUG FIX: original code started pool and queue *inside* `async with
-    # async_session_factory() as session`, meaning the SQLAlchemy session was
-    # closed as soon as the `async with` block exited — before the bot even
-    # started polling. The session factory must remain open for the lifetime of
-    # the application, or the repo must use a session-per-request pattern.
-    # Here we create a persistent session and close it in the `finally` block.
+    # BUG FIX: session must stay open for the entire app lifetime.
+    # We manage it manually with __aenter__/__aexit__ in the outer finally.
     db_session = async_session_factory()
     await db_session.__aenter__()
 
     try:
-        repo     = UserbotRepository(db_session)
-        pool     = UserbotPool(repo)
+        repo = UserbotRepository(db_session)
+        pool = UserbotPool(repo)
         registry = SourceRegistry()
         registry.register(VKMusicBotSource(client=None, priority=10))  # type: ignore[arg-type]
 
         search_manager = SearchManager(pool=pool, registry=registry, cache=cache)
-        queue          = QueueManager(search_manager=search_manager, cache=cache)
+        queue = QueueManager(search_manager=search_manager, cache=cache)
 
         await pool.start()
         await queue.start()
@@ -67,11 +65,10 @@ async def main() -> None:
         )
         dp = Dispatcher(storage=storage)
 
-        # Передаём зависимости через workflow_data
-        dp["cache"]          = cache
-        dp["queue"]          = queue
+        dp["cache"] = cache
+        dp["queue"] = queue
         dp["search_manager"] = search_manager
-        dp["pool"]           = pool
+        dp["pool"] = pool
 
         # ── Middlewares ───────────────────────────────────────────────────────
         dp.message.middleware(ThrottleMiddleware())
@@ -82,10 +79,6 @@ async def main() -> None:
         dp.callback_query.middleware(I18nMiddleware())
 
         # ── Роутеры ───────────────────────────────────────────────────────────
-        # BUG FIX: original code registered some routers after the middlewares
-        # block was split across two places and before callback_query middleware
-        # was registered. All routers are now registered in one place, after all
-        # middlewares have been attached.
         dp.include_router(start.router)
         dp.include_router(search.router)
         dp.include_router(subscription.router)
@@ -112,4 +105,7 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    # BUG FIX: uvloop (если установлен) переопределяет get_event_loop() и бросает
+    # RuntimeError до asyncio.run(). Не используем uvloop.install() явно —
+    # aiogram сам подхватит uvloop если он установлен через asyncio.run().
     asyncio.run(main())
