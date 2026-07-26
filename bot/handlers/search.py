@@ -23,11 +23,8 @@ router = Router(name="search")
 # task_id → SearchResult (для пагинации и скачивания)
 _results_cache: dict[str, SearchResult] = {}
 
-# BUG FIX: StateFilter(default_state) ensures that when admin (or any user) is
-# inside an FSM flow (e.g. AddSourceStates, BroadcastStates, AddUserbotStates),
-# their text messages are NOT intercepted by the search handler. Without this,
-# typing a source name during FSM step 1 triggers a search query simultaneously.
-@router.message(StateFilter(default_state), F.text & ~F.text.startswith("/"))
+
+@router.message(F.text & ~F.text.startswith("/"), StateFilter(default_state))
 async def handle_search_query(
     message: Message,
     user: User,
@@ -80,6 +77,7 @@ async def handle_search_query(
         reply_markup=keyboard,
     )
 
+
 @router.callback_query(F.data.startswith("dl:"))
 async def handle_download(
     callback: CallbackQuery,
@@ -88,7 +86,8 @@ async def handle_download(
     cache: CacheManager,
     _: Callable,
 ) -> None:
-    _, task_id, track_idx_str = callback.data.split(":", 2)
+    # BUG FIX: используем _cb вместо _ чтобы не перезаписать переводчик _
+    _cb, task_id, track_idx_str = callback.data.split(":", 2)
     track_idx = int(track_idx_str)
 
     result = _results_cache.get(task_id)
@@ -126,6 +125,7 @@ async def handle_download(
         await callback.message.edit_reply_markup(reply_markup=keyboard)
         await callback.answer(_("download-error"), show_alert=True)
 
+
 @router.callback_query(F.data.startswith("page:"))
 async def handle_pagination(
     callback: CallbackQuery,
@@ -133,7 +133,8 @@ async def handle_pagination(
     queue: QueueManager,
     _: Callable,
 ) -> None:
-    _, task_id, page_str = callback.data.split(":", 2)
+    # BUG FIX: используем _cb вместо _ чтобы не перезаписать переводчик _
+    _cb, task_id, page_str = callback.data.split(":", 2)
     page = int(page_str)
 
     old_result = _results_cache.get(task_id)
@@ -157,10 +158,12 @@ async def handle_pagination(
         logger.error("Ошибка пагинации: %s", e)
         await callback.answer(_("search-error"), show_alert=True)
 
+
 @router.callback_query(F.data == "close")
 async def handle_close(callback: CallbackQuery) -> None:
     await callback.message.delete()
     await callback.answer()
+
 
 @router.callback_query(F.data == "noop")
 async def handle_noop(callback: CallbackQuery) -> None:
