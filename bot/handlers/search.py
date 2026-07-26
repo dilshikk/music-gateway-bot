@@ -15,13 +15,28 @@ from core.cache_manager import CacheManager
 from core.queue_manager import QueueManager
 from core.search_manager import SearchContext, SearchManager
 from infrastructure.database.models import User
-from sources.base import SearchResult, Track
+from sources.base import SearchResult
 
 logger = logging.getLogger(__name__)
 router = Router(name="search")
 
-# task_id → SearchResult (для пагинации и скачивания)
-_results_cache: dict[str, SearchResult] = {}
+# Пример структуры для хранения сессий поиска в памяти бэкенда/бота
+# { user_id: { "search_results": SearchResult|None, "active_source": str|None, "current_query": str } }
+# Когда пользователь А делает запрос — он получает свою сессию.
+# Когда пользователь Б делает запрос — он получает свою сессию.
+# Они никак не пересекаются.
+_user_sessions: dict[int, dict] = {}
+
+
+def _get_user_session(user_id: int) -> dict:
+    if user_id not in _user_sessions:
+        _user_sessions[user_id] = {
+            "search_results": None,
+            "active_source": None,
+            "current_query": "",
+            "waiting_for_track": False,
+        }
+    return _user_sessions[user_id]
 
 
 @router.message(F.text & ~F.text.startswith("/"), StateFilter(default_state))
@@ -81,7 +96,12 @@ async def handle_search_query(
         await wait_msg.edit_text(_("search-not-found", query=query))
         return
 
-    _results_cache[task.task_id] = result
+    # Сохраняем результаты в сессию пользователя — изолированно от других
+    session = _get_user_session(user.id)
+    session["search_results"] = result
+    session["current_query"] = query
+    print(f"[search] saved to user session: user_id={user.id} tracks={len(result.tracks)}")
+    print(f"[search] _user_sessions keys: {list(_user_sessions.keys())}")
 
     keyboard = build_search_results_keyboard(result, task.task_id)
     header = _("search-results-header", query=query, total=result.total)
@@ -98,12 +118,15 @@ async def handle_download(
     _: Callable,
 ) -> None:
     print(f"[search] handle_download: callback.data={callback.data!r} user_id={user.id}")
-    # BUG FIX: используем _cb вместо _ чтобы не перезаписать переводчик _
     _cb, task_id, track_idx_str = callback.data.split(":", 2)
     track_idx = int(track_idx_str)
     print(f"[search] task_id={task_id} track_idx={track_idx}")
 
-    result = _results_cache.get(task_id)
+    # Берём результаты из сессии конкретного пользователя
+    session = _get_user_session(user.id)
+    result: SearchResult | None = session.get("search_results")
+    print(f"[search] session for user_id={user.id}: result={'found' if result else 'None'}")
+
     if not result or track_idx >= len(result.tracks):
         print(f"[search] result not found or stale: result={result}")
         await callback.answer(_("download-results-stale"), show_alert=True)
@@ -135,8 +158,8 @@ async def handle_download(
 
         from infrastructure.database.repositories.user_repo import UserRepository
         from infrastructure.database.session import async_session_factory
-        async with async_session_factory() as session:
-            await UserRepository(session).increment_requests(user.id)
+        async with async_session_factory() as session_db:
+            await UserRepository(session_db).increment_requests(user.id)
         print(f"[search] incremented requests for user_id={user.id}")
 
     except Exception as e:
@@ -155,12 +178,15 @@ async def handle_pagination(
     _: Callable,
 ) -> None:
     print(f"[search] handle_pagination: callback.data={callback.data!r} user_id={user.id}")
-    # BUG FIX: используем _cb вместо _ чтобы не перезаписать переводчик _
     _cb, task_id, page_str = callback.data.split(":", 2)
     page = int(page_str)
     print(f"[search] task_id={task_id} page={page}")
 
-    old_result = _results_cache.get(task_id)
+    # Берём текущий запрос из сессии пользователя
+    session = _get_user_session(user.id)
+    old_result: SearchResult | None = session.get("search_results")
+    print(f"[search] session for user_id={user.id}: result={'found' if old_result else 'None'}")
+
     if not old_result:
         print(f"[search] old_result not found, stale")
         await callback.answer(_("download-results-stale"), show_alert=True)
@@ -175,7 +201,10 @@ async def handle_pagination(
         task = await queue.enqueue(ctx, is_premium=user.premium)
         result = await queue.wait_for_result(task)
         print(f"[search] pagination result: tracks={len(result.tracks)} total={result.total}")
-        _results_cache[task_id] = result
+
+        # Обновляем сессию пользователя
+        session["search_results"] = result
+        print(f"[search] updated session for user_id={user.id}")
 
         keyboard = build_search_results_keyboard(result, task_id)
         await callback.message.edit_reply_markup(reply_markup=keyboard)
