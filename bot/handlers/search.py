@@ -3,7 +3,8 @@ import logging
 from collections.abc import Callable
 
 from aiogram import F, Router
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.filters import StateFilter
+from aiogram.fsm.state import default_state
 from aiogram.types import CallbackQuery, Message
 
 from bot.keyboards.search import (
@@ -22,19 +23,11 @@ router = Router(name="search")
 # task_id → SearchResult (для пагинации и скачивания)
 _results_cache: dict[str, SearchResult] = {}
 
-
-async def _safe_edit_reply_markup(callback: CallbackQuery, keyboard) -> None:
-    """edit_reply_markup, игнорируя ошибку 'message is not modified'."""
-    try:
-        await callback.message.edit_reply_markup(reply_markup=keyboard)
-    except TelegramBadRequest as e:
-        if "message is not modified" in str(e).lower():
-            logger.debug("[safe_edit] клавиатура не изменилась, пропускаем")
-        else:
-            raise
-
-
-@router.message(F.text & ~F.text.startswith("/"))
+# BUG FIX: StateFilter(default_state) ensures that when admin (or any user) is
+# inside an FSM flow (e.g. AddSourceStates, BroadcastStates, AddUserbotStates),
+# their text messages are NOT intercepted by the search handler. Without this,
+# typing a source name during FSM step 1 triggers a search query simultaneously.
+@router.message(StateFilter(default_state), F.text & ~F.text.startswith("/"))
 async def handle_search_query(
     message: Message,
     user: User,
@@ -87,17 +80,15 @@ async def handle_search_query(
         reply_markup=keyboard,
     )
 
-
 @router.callback_query(F.data.startswith("dl:"))
 async def handle_download(
     callback: CallbackQuery,
     user: User,
     search_manager: SearchManager,
     cache: CacheManager,
-    _: Callable,  # Имя обязательно '_' — aiogram инжектирует переводчик именно так
+    _: Callable,
 ) -> None:
-    # BUG FIX: распаковываем в _dl_prefix, чтобы не перезаписывать параметр-переводчик '_'
-    _dl_prefix, task_id, track_idx_str = callback.data.split(":", 2)
+    _, task_id, track_idx_str = callback.data.split(":", 2)
     track_idx = int(track_idx_str)
 
     result = _results_cache.get(task_id)
@@ -107,23 +98,22 @@ async def handle_download(
 
     track = result.tracks[track_idx]
 
-    await _safe_edit_reply_markup(callback, build_downloading_keyboard())
+    await callback.message.edit_reply_markup(reply_markup=build_downloading_keyboard())
     await callback.answer()
 
     try:
-        # Передаём target_chat_id — userbot отправит аудио боту с пометкой,
-        # relay-хендлер бота автоматически перешлёт пользователю.
-        audio = await search_manager.get_audio(
-            track,
-            user.id,
-            target_chat_id=callback.from_user.id,
+        audio = await search_manager.get_audio(track, user.id)
+
+        await callback.message.answer_audio(
+            audio=audio.telegram_file_id,
+            title=audio.title,
+            performer=audio.artist,
+            duration=audio.duration,
+            caption=_("download-caption", artist=audio.artist, title=audio.title),
         )
 
-        # audio.already_sent=True — relay-хендлер уже отправил пользователю.
-        # Ничего дополнительно отправлять не нужно.
-
         keyboard = build_search_results_keyboard(result, task_id)
-        await _safe_edit_reply_markup(callback, keyboard)
+        await callback.message.edit_reply_markup(reply_markup=keyboard)
 
         from infrastructure.database.repositories.user_repo import UserRepository
         from infrastructure.database.session import async_session_factory
@@ -133,9 +123,8 @@ async def handle_download(
     except Exception as e:
         logger.error("Ошибка скачивания трека: %s", e)
         keyboard = build_search_results_keyboard(result, task_id)
-        await _safe_edit_reply_markup(callback, keyboard)
+        await callback.message.edit_reply_markup(reply_markup=keyboard)
         await callback.answer(_("download-error"), show_alert=True)
-
 
 @router.callback_query(F.data.startswith("page:"))
 async def handle_pagination(
@@ -144,7 +133,7 @@ async def handle_pagination(
     queue: QueueManager,
     _: Callable,
 ) -> None:
-    _page_prefix, task_id, page_str = callback.data.split(":", 2)
+    _, task_id, page_str = callback.data.split(":", 2)
     page = int(page_str)
 
     old_result = _results_cache.get(task_id)
@@ -162,18 +151,16 @@ async def handle_pagination(
         _results_cache[task_id] = result
 
         keyboard = build_search_results_keyboard(result, task_id)
-        await _safe_edit_reply_markup(callback, keyboard)
+        await callback.message.edit_reply_markup(reply_markup=keyboard)
 
     except Exception as e:
         logger.error("Ошибка пагинации: %s", e)
         await callback.answer(_("search-error"), show_alert=True)
 
-
 @router.callback_query(F.data == "close")
 async def handle_close(callback: CallbackQuery) -> None:
     await callback.message.delete()
     await callback.answer()
-
 
 @router.callback_query(F.data == "noop")
 async def handle_noop(callback: CallbackQuery) -> None:
