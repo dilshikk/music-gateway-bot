@@ -4,10 +4,6 @@ import logging
 # BUG FIX: pyrogram 2.0.106 calls asyncio.get_event_loop() at import time.
 # uvloop replaces the default event loop policy and raises RuntimeError when
 # get_event_loop() is called before any loop has been created.
-# We patch the policy back to the default BEFORE any other imports happen,
-# which guarantees pyrogram's sync.py can safely call get_event_loop().
-# asyncio.run() will still use the default (or uvloop if aiogram installs it
-# after startup), so there is no performance loss.
 asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
@@ -86,16 +82,22 @@ async def main() -> None:
         dp.callback_query.middleware(I18nMiddleware())
 
         # ── Роутеры ───────────────────────────────────────────────────────────
-        dp.include_router(start.router)
-        dp.include_router(search.router)
-        dp.include_router(subscription.router)
+        # BUG FIX: admin router MUST be first so FSM states (AddUserbotStates,
+        # BroadcastStates) have priority over the catch-all search handler
+        # (F.text & ~F.text.startswith("/")) which would otherwise swallow
+        # every plain-text message including phone numbers and api credentials.
         dp.include_router(admin.router)
-        dp.include_router(inline.router)
-        dp.include_router(inline_download.router)
-        dp.include_router(inline_feedback.router)
+        dp.include_router(start.router)
+        dp.include_router(subscription.router)
         dp.include_router(settings_handler.router)
         dp.include_router(favorites.router)
         dp.include_router(popular.router)
+        dp.include_router(inline.router)
+        dp.include_router(inline_download.router)
+        dp.include_router(inline_feedback.router)
+        # search router last — its catch-all F.text handler must not intercept
+        # FSM inputs or keyboard button texts handled by routers above
+        dp.include_router(search.router)
 
         # ── Запуск ────────────────────────────────────────────────────────────
         logger.info("Бот запущен")
