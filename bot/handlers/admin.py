@@ -196,7 +196,13 @@ async def admin_ub_add_api_hash(message: Message, state: FSMContext) -> None:
     )
 
 @router.message(AddUserbotStates.waiting_session, IsAdmin())
-async def admin_ub_add_session(message: Message, state: FSMContext) -> None:
+async def admin_ub_add_session(
+    message: Message,
+    state: FSMContext,
+    # BUG FIX: pool must be injected by aiogram via dp["pool"],
+    # not fetched via message.bot.get("pool") — Bot has no .get() method
+    pool: UserbotPool,
+) -> None:
     data = await state.get_data()
     await state.clear()
 
@@ -217,7 +223,6 @@ async def admin_ub_add_session(message: Message, state: FSMContext) -> None:
             session_string=session,
         )
 
-    pool: UserbotPool = message.bot.get("pool")  # type: ignore[attr-defined]
     ok = await pool.add_userbot(userbot.id)
 
     if ok:
