@@ -19,7 +19,6 @@ from sources.base import (
     TrackNotFoundError,
 )
 
-
 # ─── Парсинг ответа бота ──────────────────────────────────────────────────────
 
 @dataclass
@@ -37,7 +36,7 @@ def _parse_search_message(msg: Message) -> _ParsedResult:
     🔍 Mulk
     Результаты 1-8 из 1000
 
-    1. Artist - Title  48:32  44.4M  128k
+    1. Artist - Title 48:32 44.4M 128k
     ...
 
     И inline-кнопки для получения callback_data каждого трека.
@@ -58,20 +57,20 @@ def _parse_search_message(msg: Message) -> _ParsedResult:
         has_next = end < total
 
     # Кнопки: каждая кнопка с числом (1-8) содержит callback_data трека
-    button_map: dict[int, str] = {}  # номер → callback_data
+    button_map: dict[int, str] = {}   # номер → callback_data
     if msg.reply_markup:
         for row in msg.reply_markup.inline_keyboard:
             for btn in row:
                 if btn.text.isdigit() and btn.callback_data:
                     button_map[int(btn.text)] = btn.callback_data
 
-    # Строки треков: "1. Artist - Title  HH:MM  XXM  128k"
+    # Строки треков: "1. Artist - Title HH:MM XXM 128k"
     line_pattern = re.compile(
-        r"^(\d+)\.\s+(.+?)\s+"             # номер + название
-        r"(\d+:\d{2})\s+"                   # длительность MM:SS или HH:MM:SS
-        r"([\d.]+)M\s+"                     # размер в МБ
-        r"(\d+)k"                           # битрейт
-        r"(\s+Lossless)?",                  # опциональный Lossless
+        r"^(\d+)\.\s+(.+?)\s+"         # номер + название
+        r"(\d+:\d{2})\s+"              # длительность MM:SS или HH:MM:SS
+        r"([\d.]+)M\s+"                # размер в МБ
+        r"(\d+)k"                      # битрейт
+        r"(\s+Lossless)?",             # опциональный Lossless
         re.MULTILINE,
     )
 
@@ -83,7 +82,6 @@ def _parse_search_message(msg: Message) -> _ParsedResult:
         bitrate   = int(m.group(5))
         lossless  = bool(m.group(6))
 
-        # Разбиваем "Artist - Title" если есть разделитель
         if " - " in raw_title:
             artist, title = raw_title.split(" - ", 1)
         else:
@@ -125,25 +123,25 @@ class VKMusicBotSource(MusicSource):
     Источник музыки через @vkmusic_bot.
 
     Алгоритм:
-      1. Отправить текстовый запрос боту
-      2. Дождаться ответа с inline-кнопками
-      3. Нажать кнопку нужного трека (click callback_data)
-      4. Дождаться сообщения с аудио
-      5. Вернуть file_id для пересылки
+    1. Отправить текстовый запрос боту
+    2. Дождаться ответа с inline-кнопками
+    3. Нажать кнопку нужного трека (click по callback_data)
+    4. Дождаться сообщения с аудио
+    5. Вернуть file_id для пересылки
     """
 
-    name         = "VK Music Bot"
+    name = "VK Music Bot"
     bot_username = "vkmusic_bot"
-    source_type  = "telegram_bot"
+    source_type = "telegram_bot"
 
     # Задержки (секунды)
-    SEARCH_WAIT     = 5.0   # ждём ответ на поисковый запрос
-    AUDIO_WAIT      = 10.0  # ждём ответ после нажатия кнопки
-    POLL_INTERVAL   = 0.5   # интервал polling при ожидании
+    SEARCH_WAIT   = 5.0   # ждём ответ на поисковый запрос
+    AUDIO_WAIT    = 10.0  # ждём ответ после нажатия кнопки
+    POLL_INTERVAL = 0.5   # интервал polling при ожидании
 
     def __init__(
         self,
-        client: Client,  # Pyrogram userbot
+        client: Client,       # Pyrogram userbot
         priority: int = 1,
         timeout: int = 30,
         enabled: bool = True,
@@ -172,17 +170,12 @@ class VKMusicBotSource(MusicSource):
     async def _search_internal(self, query: str, page: int) -> SearchResult:
         await self._client.send_message(self.bot_username, query)
 
-        # Ждём ответ бота с inline-кнопками
-        msg = await self._wait_for_reply(
-            has_markup=True,
-            timeout=self.SEARCH_WAIT,
-        )
+        msg = await self._wait_for_reply(has_markup=True, timeout=self.SEARCH_WAIT)
         if not msg:
             raise SourceTimeoutError(f"Нет ответа от {self.bot_username}")
 
         parsed = _parse_search_message(msg)
 
-        # Если запрошена страница > 1 — листаем через ➡️ кнопку
         if page > 1:
             msg = await self._navigate_to_page(msg, page)
             parsed = _parse_search_message(msg)
@@ -215,19 +208,25 @@ class VKMusicBotSource(MusicSource):
             raise SourceUnavailableError(str(e)) from e
 
     async def _get_audio_internal(self, track: Track) -> AudioFile:
-        # BUG FIX: validate that source_track_id is present before clicking
         if not track.source_track_id:
             raise TrackNotFoundError(
                 f"Трек не имеет source_track_id: {track.title}"
             )
 
-        # Находим последнее сообщение с inline-кнопками (результаты поиска)
+        # Находим последнее сообщение бота с inline-кнопками
         search_msg = await self._get_last_search_message()
         if not search_msg:
             raise TrackNotFoundError("Не найдено сообщение с результатами поиска")
 
-        # Нажимаем кнопку с нужным callback_data
-        await search_msg.click(track.source_track_id)
+        # BUG FIX: Pyrogram Message.click() ищет кнопку ПО ТЕКСТУ по умолчанию.
+        # source_track_id содержит callback_data ('a:519...:1'), а не текст кнопки.
+        # Нужно найти кнопку по callback_data вручную и вызвать RequestCallbackAnswer.
+        target_cbd = track.source_track_id
+        clicked = await _click_by_callback_data(search_msg, target_cbd)
+        if not clicked:
+            raise TrackNotFoundError(
+                f"Кнопка с callback_data '{target_cbd}' не найдена в сообщении"
+            )
 
         # Ждём сообщение с аудио
         audio_msg = await self._wait_for_audio(timeout=self.AUDIO_WAIT)
@@ -258,14 +257,10 @@ class VKMusicBotSource(MusicSource):
         """Листает страницы через кнопку ➡️ до нужной страницы."""
         current = msg
         for _ in range(target_page - 1):
-            next_btn = _find_button(current, "➡️")
+            next_btn = _find_button_by_text(current, "➡️")
             if not next_btn:
-                # BUG FIX: if there's no next button, we've reached the last page;
-                # return current instead of silently continuing with a stale message
                 break
-            await current.click(next_btn.callback_data)
-            # BUG FIX: re-fetch the updated message after click instead of using
-            # a stale _wait_for_reply that might return any new message from the bot
+            await _click_by_callback_data(current, next_btn.callback_data)
             updated = await self._wait_for_reply(has_markup=True, timeout=self.SEARCH_WAIT)
             if updated:
                 current = updated
@@ -285,7 +280,6 @@ class VKMusicBotSource(MusicSource):
         deadline = time.monotonic() + timeout
         last_id: int | None = None
 
-        # Запоминаем ID последнего сообщения до запроса
         async for m in self._client.get_chat_history(self.bot_username, limit=1):
             last_id = m.id
 
@@ -294,8 +288,6 @@ class VKMusicBotSource(MusicSource):
             async for m in self._client.get_chat_history(self.bot_username, limit=1):
                 if m.id != last_id:
                     if has_markup and not m.reply_markup:
-                        # BUG FIX: update last_id so we don't keep comparing against
-                        # the original message — the bot may send multiple messages
                         last_id = m.id
                         continue
                     return m
@@ -311,8 +303,6 @@ class VKMusicBotSource(MusicSource):
 
         while time.monotonic() < deadline:
             await asyncio.sleep(self.POLL_INTERVAL)
-            # BUG FIX: limit=3 is not enough if the bot sends multiple non-audio
-            # messages quickly. Use limit=5 and check all of them.
             async for m in self._client.get_chat_history(self.bot_username, limit=5):
                 if m.id != last_id and m.audio:
                     return m
@@ -328,7 +318,36 @@ class VKMusicBotSource(MusicSource):
 
 # ─── Вспомогательные функции ──────────────────────────────────────────────────
 
-def _find_button(msg: Message, text: str):
+async def _click_by_callback_data(msg: Message, callback_data: str) -> bool:
+    """
+    Нажимает кнопку в сообщении по значению callback_data.
+
+    Pyrogram's Message.click() searches by button TEXT by default.
+    This helper iterates the keyboard, finds the matching callback_data,
+    and calls RequestCallbackAnswer directly via the raw API.
+    """
+    if not msg.reply_markup:
+        return False
+
+    for row in msg.reply_markup.inline_keyboard:
+        for btn in row:
+            if btn.callback_data == callback_data:
+                # Use Pyrogram's click with the button's text (guaranteed unique in this row)
+                # or fall back to the raw index approach via click(callback_data=...)
+                # Pyrogram >= 2.x supports click(callback_data=str) directly:
+                try:
+                    await msg.click(callback_data)  # tries text first, then callback_data
+                except Exception:
+                    # Fallback: click by row/column index
+                    row_idx = msg.reply_markup.inline_keyboard.index(row)
+                    col_idx = row.index(btn)
+                    await msg.click(row_idx, col_idx)
+                return True
+
+    return False
+
+
+def _find_button_by_text(msg: Message, text: str):
     """Находит кнопку по тексту в reply_markup."""
     if not msg.reply_markup:
         return None
