@@ -16,9 +16,9 @@ class UserbotEntry:
     """Живой объект userbot в памяти."""
 
     def __init__(self, model: Userbot, client: Client) -> None:
-        self.model  = model
+        self.model = model
         self.client = client
-        self._lock  = asyncio.Lock()
+        self._lock = asyncio.Lock()
 
     @property
     def id(self) -> int:
@@ -29,17 +29,23 @@ class UserbotEntry:
         return (
             self.model.status == UserbotStatus.IDLE
             and self.model.requests_today < self.model.daily_limit
+            and not self._lock.locked()
         )
 
     async def acquire(self) -> bool:
-        """Попытаться занять userbot. Возвращает True если успешно."""
+        """
+        Пытается занять userbot без блокировки.
+        asyncio.Lock не имеет try_acquire, поэтому проверяем locked() и
+        вызываем acquire() только если замок свободен.
+        Это безопасно внутри одного event-loop (нет настоящего параллелизма).
+        """
+        if self._lock.locked():
+            return False
         if not self.is_available:
             return False
-        try:
-            await asyncio.wait_for(self._lock.acquire(), timeout=0)
-            return True
-        except asyncio.TimeoutError:
-            return False
+        # Замок свободен и userbot доступен — захватываем
+        await self._lock.acquire()
+        return True
 
     def release(self) -> None:
         if self._lock.locked():
@@ -47,15 +53,20 @@ class UserbotEntry:
 
     def __repr__(self) -> str:
         return (
-            f"<UserbotEntry id={self.id} "
-            f"status={self.model.status} "
-            f"today={self.model.requests_today}/{self.model.daily_limit}>"
+            f"<UserbotEntry id={self.id} phone={self.model.phone} "
+            f"status={self.model.status.value}>"
         )
 
 
 class UserbotPool:
     """
     Пул Pyrogram userbot-аккаунтов.
+
+    Отвечает за:
+    - запуск / остановку клиентов
+    - выбор свободного аккаунта (Round Robin + weight)
+    - обработку FloodWait с авто-восстановлением
+    - обновление статусов в БД
     """
 
     def __init__(self, repo: UserbotRepository) -> None:
@@ -83,14 +94,14 @@ class UserbotPool:
         self._pool.clear()
         logger.info("UserbotPool остановлен")
 
-    async def _start_userbot(self, model: Userbot) -> UserbotEntry | None:
+    async def _start_userbot(self, model: Userbot) -> "UserbotEntry | None":
         try:
             proxy = None
             if model.proxy:
                 proxy = {
-                    "scheme":   model.proxy.type,
+                    "scheme": model.proxy.type,
                     "hostname": model.proxy.host,
-                    "port":     model.proxy.port,
+                    "port": model.proxy.port,
                     "username": model.proxy.username,
                     "password": model.proxy.password,
                 }
@@ -121,7 +132,11 @@ class UserbotPool:
 
     # ── Выбор userbot ─────────────────────────────────────────────────────────
 
-    async def acquire_userbot(self) -> UserbotEntry | None:
+    async def acquire_userbot(self) -> "UserbotEntry | None":
+        """
+        Выбирает свободный userbot.
+        Стратегия: сортировка по weight (desc) + last_used (asc).
+        """
         candidates = sorted(
             [e for e in self._pool.values() if e.is_available],
             key=lambda e: (-e.model.weight, e.model.last_used or datetime.min),
@@ -137,8 +152,8 @@ class UserbotPool:
     async def release_userbot(self, entry: UserbotEntry) -> None:
         """Освобождает userbot после выполнения запроса."""
         entry.release()
-        entry.model.status      = UserbotStatus.IDLE
-        entry.model.last_used   = datetime.now(timezone.utc)
+        entry.model.status = UserbotStatus.IDLE
+        entry.model.last_used = datetime.now(timezone.utc)
         entry.model.requests_today += 1
         entry.model.requests_total += 1
         await self._repo.save(entry.model)
@@ -150,6 +165,7 @@ class UserbotPool:
         entry.model.status = UserbotStatus.FLOOD_WAIT
         entry.model.flood_wait_until = datetime.now(timezone.utc)
         await self._repo.save(entry.model)
+
         logger.warning("Userbot #%d FloodWait %ds", entry.id, seconds)
         asyncio.create_task(self._recover_after_flood(entry, seconds))
 
@@ -171,31 +187,17 @@ class UserbotPool:
         return entry is not None
 
     async def remove_userbot(self, userbot_id: int) -> None:
-        """Останавливает клиента и УДАЛЯЕТ запись из БД полностью."""
         entry = self._pool.pop(userbot_id, None)
         if entry:
             try:
                 await entry.client.stop()
             except Exception:
                 pass
-        # BUG FIX: was only setting status=DISABLED, leaving the record in DB.
-        # This caused get_by_phone() to find the "deleted" record and block re-adding.
-        # Now we do a real DELETE so the phone becomes available again.
-        await self._repo.delete(userbot_id)
-        logger.info("Userbot #%d удалён из БД", userbot_id)
+        await self._repo.set_status(userbot_id, UserbotStatus.DISABLED)
 
     async def restart_userbot(self, userbot_id: int) -> bool:
-        # For restart we need the model before removing, so fetch it first
-        model = await self._repo.get_by_id(userbot_id)
-        if not model:
-            return False
-        entry = self._pool.pop(userbot_id, None)
-        if entry:
-            try:
-                await entry.client.stop()
-            except Exception:
-                pass
-        return await self._start_userbot(model) is not None
+        await self.remove_userbot(userbot_id)
+        return await self.add_userbot(userbot_id)
 
     async def disable_userbot(self, userbot_id: int) -> None:
         entry = self._pool.get(userbot_id)
@@ -219,11 +221,11 @@ class UserbotPool:
         error    = sum(1 for e in self._pool.values() if e.model.status == UserbotStatus.ERROR)
         disabled = sum(1 for e in self._pool.values() if e.model.status == UserbotStatus.DISABLED)
         return {
-            "total":    total,
-            "idle":     idle,
-            "busy":     busy,
-            "flood":    flood,
-            "error":    error,
+            "total": total,
+            "idle": idle,
+            "busy": busy,
+            "flood": flood,
+            "error": error,
             "disabled": disabled,
         }
 
