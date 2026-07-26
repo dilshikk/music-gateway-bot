@@ -283,13 +283,24 @@ class VKMusicBotSource(MusicSource):
         # Плоский индекс кнопки в клавиатуре, сохранённый при парсинге
         btn_index: int = track.raw.get("button_index", -1)
         if btn_index < 0:
-            logger.error(
-                "[get_audio_internal] button_index не задан для %r  raw=%r",
-                track.title, track.raw,
-            )
-            raise TrackNotFoundError(
-                f"Нет button_index для трека: {track.title}"
-            )
+            # Fallback: button_num - 1 (digit buttons always come first in VK bot keyboard)
+            # Это нужно для треков из кэша, где button_index ещё не был сохранён
+            fallback = track.raw.get("button_num")
+            if isinstance(fallback, int) and fallback > 0:
+                btn_index = fallback - 1
+                logger.warning(
+                    "[get_audio_internal] button_index отсутствует, "
+                    "используем fallback button_num-1=%d для %r",
+                    btn_index, track.title,
+                )
+            else:
+                logger.error(
+                    "[get_audio_internal] button_index не задан для %r  raw=%r",
+                    track.title, track.raw,
+                )
+                raise TrackNotFoundError(
+                    f"Нет button_index для трека: {track.title}"
+                )
 
         logger.debug("[get_audio_internal] ищём сообщение с кнопками в истории чата")
         search_msg = await self._get_last_search_message()
