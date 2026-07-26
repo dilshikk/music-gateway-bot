@@ -9,6 +9,7 @@ from redis.asyncio import Redis
 
 from bot.handlers import admin, search, start, subscription
 from bot.handlers import relay
+from bot.handlers import admin_sources
 from bot.middlewares.auth import AuthMiddleware
 from bot.middlewares.rate_limit import RateLimitMiddleware
 from bot.middlewares.subscription import SubscriptionMiddleware
@@ -101,6 +102,8 @@ async def main() -> None:
     dp.include_router(start.router)
     dp.include_router(search.router)
     dp.include_router(subscription.router)
+    # admin_sources MUST be before admin.router to intercept admin:sources callbacks
+    dp.include_router(admin_sources.router)
     dp.include_router(admin.router)
     dp.include_router(inline.router)
     dp.include_router(inline_download.router)
