@@ -1,3 +1,5 @@
+from collections.abc import Callable
+
 from aiogram import F, Router
 from aiogram.types import CallbackQuery
 
@@ -8,7 +10,10 @@ router = Router(name="subscription")
 
 
 @router.callback_query(F.data == "check_sub")
-async def handle_check_subscription(callback: CallbackQuery) -> None:
+async def handle_check_subscription(
+    callback: CallbackQuery,
+    _: Callable,
+) -> None:
     if not callback.from_user or not callback.bot:
         await callback.answer()
         return
@@ -19,16 +24,13 @@ async def handle_check_subscription(callback: CallbackQuery) -> None:
     )
 
     if not_subscribed:
+        channels_text = "\n".join(f"• {ch['title']}" for ch in not_subscribed)
         keyboard = build_subscription_keyboard(not_subscribed)
         await callback.message.edit_text(
-            "❌ Вы ещё не подписались на все каналы:\n\n"
-            + "\n".join(f"• {ch['title']}" for ch in not_subscribed),
+            _("subscription-fail", channels=channels_text),
             reply_markup=keyboard,
         )
-        await callback.answer("Подпишитесь на все каналы!", show_alert=True)
+        await callback.answer(_("subscription-check"), show_alert=True)
     else:
-        await callback.message.edit_text(
-            "✅ Отлично! Вы подписаны на все каналы.\n\n"
-            "Теперь вы можете пользоваться ботом."
-        )
-        await callback.answer("Доступ открыт!")
+        await callback.message.edit_text(_("subscription-success"))
+        await callback.answer(_("subscription-check"))
