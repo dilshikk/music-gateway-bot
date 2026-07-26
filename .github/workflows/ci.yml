@@ -1,0 +1,142 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop, "feature/**"]
+  pull_request:
+    branches: [main, develop]
+  workflow_call:
+    secrets:
+      CODECOV_TOKEN:
+        required: false
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.13"
+
+jobs:
+
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install lint tools
+        run: pip install ruff==0.8.0 mypy==1.13.0
+      - name: Ruff lint
+        run: ruff check . --output-format=github
+      - name: Ruff format
+        run: ruff format --check .
+      - name: Mypy
+        run: |
+          pip install -r requirements.txt -r requirements-dev.txt --quiet
+          mypy . --ignore-missing-imports --no-error-summary
+
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Run unit tests
+        run: |
+          pytest tests/unit/ \
+            --timeout=30 \
+            --tb=short \
+            -q \
+            --cov=. \
+            --cov-report=xml:coverage-unit.xml \
+            --cov-omit="tests/*,*/migrations/*"
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage-unit.xml
+          flags: unit
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    needs: lint
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB:       music_gateway_test
+          POSTGRES_USER:     postgres
+          POSTGRES_PASSWORD: testpassword
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+asyncpg://postgres:testpassword@localhost:5432/music_gateway_test
+      REDIS_URL:    redis://localhost:6379/0
+      BOT_TOKEN:    "0000000000:test_token_placeholder"
+      SECRET_KEY:   "test-secret-key-32-chars-minimum!"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Run migrations
+        run: alembic upgrade head
+      - name: Run integration tests
+        run: |
+          pytest tests/integration/ \
+            --timeout=60 --tb=short -v \
+            --cov=. --cov-report=xml:coverage-integration.xml --cov-append
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage-integration.xml
+          flags: integration
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+
+  docker-build:
+    name: Docker Build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    needs: [unit-tests, integration-tests]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: music-gateway:${{ github.sha }}
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max

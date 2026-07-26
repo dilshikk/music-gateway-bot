@@ -1,0 +1,50 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"     # v1.0.0, v2.3.1-beta и т.д.
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # нужен для генерации changelog
+
+      - name: Generate changelog
+        id: changelog
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: .github/cliff.toml
+          args: --latest --strip header
+
+      - name: Build Docker image for release
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+            ghcr.io/${{ github.repository }}:stable
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name:   ${{ github.ref_name }}
+          name:       Release ${{ github.ref_name }}
+          body:       ${{ steps.changelog.outputs.content }}
+          draft:      false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: false

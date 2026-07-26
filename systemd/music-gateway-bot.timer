@@ -1,0 +1,10 @@
+[Unit]
+Description=Music Gateway Bot — Auto Start Timer
+After=network-online.target
+
+[Timer]
+OnBootSec=30s
+Unit=music-gateway-bot.service
+
+[Install]
+WantedBy=timers.target

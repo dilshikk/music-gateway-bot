@@ -1,0 +1,53 @@
+name: Security Audit
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"   # Каждый понедельник в 06:00 UTC
+  workflow_dispatch:
+
+jobs:
+
+  audit:
+    name: Dependency Audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install pip-audit
+        run: pip install pip-audit safety
+
+      - name: pip-audit
+        run: |
+          pip install -r requirements.txt --quiet
+          pip-audit --desc --format=json -o pip-audit.json || true
+          pip-audit --desc
+
+      - name: Safety check
+        run: safety check -r requirements.txt --full-report || true
+
+      - name: Upload audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-audit-${{ github.run_id }}
+          path: pip-audit.json
+          retention-days: 30
+
+      - name: Notify on vulnerabilities
+        if: failure()
+        uses: appleboy/telegram-action@v0.1.1
+        with:
+          to:    ${{ secrets.TELEGRAM_NOTIFY_CHAT_ID }}
+          token: ${{ secrets.TELEGRAM_NOTIFY_BOT_TOKEN }}
+          message: |
+            ⚠️ *Найдены уязвимости в зависимостях*
+
+            Репозиторий: `${{ github.repository }}`
+
+            [Посмотреть отчёт](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})

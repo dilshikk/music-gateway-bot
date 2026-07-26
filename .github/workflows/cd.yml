@@ -1,0 +1,143 @@
+name: CD — Deploy to Production
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        required: true
+        default: production
+        type: choice
+        options: [production, staging]
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY:   ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+
+  pre-deploy-check:
+    name: Pre-deploy CI
+    uses: ./.github/workflows/ci.yml
+    secrets: inherit
+
+  build-and-push:
+    name: Build & Push Image
+    runs-on: ubuntu-24.04
+    needs: pre-deploy-check
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tags }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=sha-
+            type=ref,event=branch
+            type=raw,value=latest,enable={{is_default_branch}}
+      - uses: docker/setup-buildx-action@v3
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags:       ${{ steps.meta.outputs.tags }}
+          labels:     ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max
+
+  deploy:
+    name: Deploy to Server
+    runs-on: ubuntu-24.04
+    needs: build-and-push
+    timeout-minutes: 15
+    environment:
+      name: ${{ github.event.inputs.environment || 'production' }}
+      url:  ${{ secrets.APP_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host:        ${{ secrets.SSH_HOST }}
+          username:    ${{ secrets.SSH_USER }}
+          key:         ${{ secrets.SSH_PRIVATE_KEY }}
+          port:        ${{ secrets.SSH_PORT || 22 }}
+          script_stop: true
+          script: |
+            set -euo pipefail
+            cd /opt/music_gateway
+
+            echo "${{ secrets.GHCR_PAT }}" | \
+              docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+            docker pull ${{ needs.build-and-push.outputs.image_tag }}
+
+            docker compose run --rm migrate
+
+            if [[ "$OSTYPE" == "darwin"* ]]; then
+              sed -i '' "s|^IMAGE_TAG=.*|IMAGE_TAG=${{ needs.build-and-push.outputs.image_tag }}|" .env
+            else
+              sed -i "s|^IMAGE_TAG=.*|IMAGE_TAG=${{ needs.build-and-push.outputs.image_tag }}|" .env
+            fi
+
+            docker compose up -d --no-deps bot
+            docker compose up -d --no-deps api
+            sleep 5
+            docker compose up -d --no-deps --scale worker=2 worker
+
+            for i in $(seq 1 12); do
+              if curl -sf "http://localhost:8000/health" | grep -q '"status":"ok"'; then
+                echo "✅ Healthcheck passed"
+                break
+              fi
+              [ $i -eq 12 ] && { echo "❌ Healthcheck failed"; docker compose down --timeout 10; exit 1; }
+              echo "Waiting... ($i/12)"
+              sleep 5
+            done
+
+            docker image prune -f --filter "until=24h"
+            echo "🚀 Deploy complete: ${{ github.sha }}"
+
+      - name: Notify success
+        if: success()
+        uses: appleboy/telegram-action@v0.1.1
+        with:
+          to:    ${{ secrets.TELEGRAM_NOTIFY_CHAT_ID }}
+          token: ${{ secrets.TELEGRAM_NOTIFY_BOT_TOKEN }}
+          message: |
+            ✅ *Deploy succeeded*
+            Repo: `${{ github.repository }}`
+            Commit: `${{ github.sha }}`
+            Author: ${{ github.actor }}
+
+      - name: Notify failure
+        if: failure()
+        uses: appleboy/telegram-action@v0.1.1
+        with:
+          to:    ${{ secrets.TELEGRAM_NOTIFY_CHAT_ID }}
+          token: ${{ secrets.TELEGRAM_NOTIFY_BOT_TOKEN }}
+          message: |
+            ❌ *Deploy failed*
+            Repo: `${{ github.repository }}`
+            Commit: `${{ github.sha }}`
+            [View logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})

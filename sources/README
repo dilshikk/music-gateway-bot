@@ -1,0 +1,4 @@
+Добавить новый источник = создать один файл и зарегистрировать:
+
+
+registry.register(CustomMusicSource(client=userbot, priority=5))

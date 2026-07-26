@@ -1,0 +1,151 @@
+version: "3.9"
+
+x-common: &common
+  restart: unless-stopped
+  env_file: .env
+  networks:
+    - app_network
+
+services:
+
+  # ── Основной бот ─────────────────────────────────────────────────────────────
+  bot:
+    <<: *common
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: final
+    command: python -m bot.main
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./sessions:/app/sessions
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'bot.main' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── Воркер очереди ────────────────────────────────────────────────────────────
+  worker:
+    <<: *common
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: final
+    command: python -m core.worker
+    depends_on:
+      - bot
+    volumes:
+      - ./sessions:/app/sessions
+    deploy:
+      replicas: 2  # можно масштабировать горизонтально
+
+  # ── FastAPI внутренний API ────────────────────────────────────────────────────
+  api:
+    <<: *common
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: final
+    command: >
+      uvicorn api.main:app
+      --host 0.0.0.0
+      --port 8000
+      --workers 2
+      --loop uvloop
+    ports:
+      - "127.0.0.1:8000:8000"  # только localhost, снаружи через nginx
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # ── PostgreSQL ────────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    networks:
+      - app_network
+    environment:
+      POSTGRES_DB:       music_gateway
+      POSTGRES_USER:     postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d music_gateway"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    command: >
+      postgres
+      -c max_connections=100
+      -c shared_buffers=256MB
+      -c effective_cache_size=768MB
+      -c maintenance_work_mem=64MB
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=16MB
+      -c log_min_duration_statement=500
+
+  # ── Redis ─────────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    networks:
+      - app_network
+    command: >
+      redis-server
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --appendonly yes
+      --appendfsync everysec
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── Nginx ─────────────────────────────────────────────────────────────────────
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    networks:
+      - app_network
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./docker/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - api
+
+  # ── Миграции (запускаются один раз и завершаются) ─────────────────────────────
+  migrate:
+    <<: *common
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: final
+    command: alembic upgrade head
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+networks:
+  app_network:
+    driver: bridge
+
+volumes:
+  pgdata:
+  redisdata:

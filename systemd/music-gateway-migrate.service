@@ -1,0 +1,19 @@
+[Unit]
+Description=Music Gateway — Run DB Migrations
+After=network-online.target docker.service
+Requires=docker.service
+Before=music-gateway-bot.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/music_gateway
+ExecStart=/usr/bin/docker compose run --rm migrate
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=music-gateway-migrate
+TimeoutStartSec=120
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

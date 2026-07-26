@@ -1,0 +1,25 @@
+Как компоненты работают вместе
+
+Запрос пользователя
+        │
+        ▼
+QueueManager.enqueue()
+  → проверка rate limit (CacheManager)
+  → добавление в PriorityQueue
+        │
+        ▼
+Worker (один из 10)
+        │
+        ▼
+SearchManager.search()
+  → проверка кэша (CacheManager)
+  → выбор источника (SourceRegistry)
+  → выбор userbot (UserbotPool)
+  → source.search() / fallback
+  → запись в кэш
+        │
+        ▼
+task._future.set_result()
+        │
+        ▼
+Bot отправляет результат пользователю
