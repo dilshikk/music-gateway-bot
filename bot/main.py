@@ -11,7 +11,6 @@ from bot.handlers import admin, search, start, subscription
 from bot.handlers import relay
 from bot.middlewares.auth import AuthMiddleware
 from bot.middlewares.rate_limit import RateLimitMiddleware
-from bot.middlewares.subscription import SubscriptionMiddleware
 from bot.middlewares.i18n import I18nMiddleware
 from bot.middlewares.throttle import ThrottleMiddleware
 from config.settings import settings
@@ -34,16 +33,12 @@ logger = logging.getLogger(__name__)
 
 
 async def main() -> None:
-    # ── Redis ────────────────────────────────────────────────────────────────────
+    # ── Redis ─────────────────────────────────────────────────────────────────
     redis = Redis.from_url(settings.redis_url, decode_responses=False)
     storage = RedisStorage(redis=redis)
     cache = CacheManager(redis)
 
-    # ── Репозиторий использует фабрику сессий (session-per-operation) ─────────
-    repo = UserbotRepository(session_factory=async_session_factory)
-    pool = UserbotPool(repo)
-
-    # ── Bot (create early to get bot ID) ─────────────────────────────────────
+    # ── Bot (создаём рано — нужен bot_id для relay) ───────────────────────────
     bot = Bot(
         token=settings.BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
@@ -51,42 +46,54 @@ async def main() -> None:
     bot_info = await bot.get_me()
     bot_id = bot_info.id
     logger.info("Бот @%s (id=%d)", bot_info.username, bot_id)
+    print(f"[main] бот @{bot_info.username} id={bot_id}")
 
-    # ── Источники ──────────────────────────────────────────────────────────────
-    registry = SourceRegistry()
-    registry.register(VKMusicBotSource(
-        client=None,  # type: ignore[arg-type]
+    # ── Userbot pool ──────────────────────────────────────────────────────────
+    repo = UserbotRepository(session_factory=async_session_factory)
+    pool = UserbotPool(repo)
+    await pool.start()
+    print(f"[main] userbot pool запущен")
+
+    # ── Источник музыки с очередью ────────────────────────────────────────────
+    # Один userbot + asyncio.Queue — задачи обрабатываются строго по одной,
+    # никакой гонки за ответами @vkmusic_bot между пользователями.
+    source = VKMusicBotSource(
+        client=None,  # type: ignore[arg-type]  — клиент выдаётся из pool
         priority=10,
         relay_bot_id=bot_id,
-    ))
+    )
+    await source.start()
+    print(f"[main] source worker запущен")
+
+    registry = SourceRegistry()
+    registry.register(source)
 
     search_manager = SearchManager(pool=pool, registry=registry, cache=cache)
     queue = QueueManager(search_manager=search_manager, cache=cache)
-
-    await pool.start()
     await queue.start()
+    print(f"[main] queue manager запущен")
 
-    # Регистрируем ID userbot-ов для relay-хендлера
-    userbot_ids = set()
+    # ── Регистрируем ID userbot-ов для relay-хендлера ─────────────────────────
+    userbot_ids: set[int] = set()
     for entry in pool.list_userbots():
-        # Получаем Telegram ID аккаунта userbot
         try:
             me = await entry.client.get_me()
             userbot_ids.add(me.id)
+            print(f"[main] userbot id={me.id} @{me.username}")
         except Exception as e:
             logger.warning("Не удалось получить ID userbot #%d: %s", entry.id, e)
     relay.register_userbot_ids(userbot_ids)
+    print(f"[main] зарегистрировано userbot ids: {userbot_ids}")
 
-    # ── Dispatcher ─────────────────────────────────────────────────────────────
+    # ── Dispatcher ────────────────────────────────────────────────────────────
     dp = Dispatcher(storage=storage)
 
-    # Передаём зависимости через workflow_data
-    dp["cache"] = cache
-    dp["queue"] = queue
+    dp["cache"]          = cache
+    dp["queue"]          = queue
     dp["search_manager"] = search_manager
-    dp["pool"] = pool
+    dp["pool"]           = pool
 
-    # ── Middlewares ────────────────────────────────────────────────────────────
+    # ── Middlewares ───────────────────────────────────────────────────────────
     dp.message.middleware(ThrottleMiddleware())
     dp.message.middleware(AuthMiddleware())
     dp.message.middleware(RateLimitMiddleware(cache))
@@ -95,8 +102,7 @@ async def main() -> None:
     dp.callback_query.middleware(I18nMiddleware())
 
     # ── Роутеры ───────────────────────────────────────────────────────────────
-    # IMPORTANT: relay должен быть ПЕРВЫМ, чтобы перехватить аудио от userbot
-    # до того, как AuthMiddleware попытается зарегистрировать userbot как пользователя.
+    # IMPORTANT: relay ПЕРВЫМ — перехватывает аудио от userbot до AuthMiddleware
     dp.include_router(relay.router)
     dp.include_router(start.router)
     dp.include_router(search.router)
@@ -111,13 +117,16 @@ async def main() -> None:
 
     # ── Запуск ────────────────────────────────────────────────────────────────
     logger.info("Бот запущен")
+    print("[main] бот запущен, начинаем polling")
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
+        await source.stop()
         await queue.stop()
         await pool.stop()
         await bot.session.close()
         logger.info("Бот остановлен")
+        print("[main] бот остановлен")
 
 
 if __name__ == "__main__":
