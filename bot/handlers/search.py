@@ -3,7 +3,6 @@ import logging
 from collections.abc import Callable
 
 from aiogram import F, Router
-from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, Message
 
 from bot.keyboards.search import (
@@ -21,18 +20,6 @@ router = Router(name="search")
 
 # task_id → SearchResult (для пагинации и скачивания)
 _results_cache: dict[str, SearchResult] = {}
-
-
-async def _safe_edit_markup(msg, reply_markup) -> None:
-    """
-    Безопасно обновляет reply_markup — игнорирует ошибку
-    'message is not modified' при двойном нажатии.
-    """
-    try:
-        await msg.edit_reply_markup(reply_markup=reply_markup)
-    except TelegramBadRequest as e:
-        if "message is not modified" not in str(e):
-            raise
 
 
 @router.message(F.text & ~F.text.startswith("/"))
@@ -97,9 +84,8 @@ async def handle_download(
     cache: CacheManager,
     _: Callable,
 ) -> None:
-    parts     = callback.data.split(":", 2)
-    task_id   = parts[1]
-    track_idx = int(parts[2])
+    _, task_id, track_idx_str = callback.data.split(":", 2)
+    track_idx = int(track_idx_str)
 
     result = _results_cache.get(task_id)
     if not result or track_idx >= len(result.tracks):
@@ -108,20 +94,28 @@ async def handle_download(
 
     track = result.tracks[track_idx]
 
-    await _safe_edit_markup(callback.message, build_downloading_keyboard())
+    await callback.message.edit_reply_markup(reply_markup=build_downloading_keyboard())
     await callback.answer()
 
+    # Telegram chat_id пользователя — userbot отправит аудио напрямую в этот чат
+    target_chat_id = callback.from_user.id
+
     try:
-        # Userbot доставляет аудио напрямую в чат пользователя (copy_message).
-        # file_id из Pyrogram-сессии невалиден для главного бота.
-        target_chat_id = callback.message.chat.id
         audio = await search_manager.get_audio(
-            track, user.id, target_chat_id=target_chat_id
+            track,
+            user.id,
+            target_chat_id=target_chat_id,
         )
 
-        if not audio.delivered:
-            # Запасной путь для источников, возвращающих настоящий file_id
-            # (например, CustomMusicSource / HTTP API).
+        if not audio.already_sent:
+            # Фаллбек: если по какой-то причине userbot не отправил напрямую,
+            # aiogram-бот отправляет сам. file_id может не работать
+            # если бот и userbot в разных DC, но пробуем.
+            logger.warning(
+                "[download] already_sent=False, отправляем через бот  "
+                "file_id=%r  user=%d",
+                audio.telegram_file_id, user.telegram_id,
+            )
             await callback.message.answer_audio(
                 audio=audio.telegram_file_id,
                 title=audio.title,
@@ -129,10 +123,15 @@ async def handle_download(
                 duration=audio.duration,
                 caption=_("download-caption", artist=audio.artist, title=audio.title),
             )
+        else:
+            logger.info(
+                "[download] аудио уже доставлено userbot-ом  "
+                "target_chat_id=%d  user=%d",
+                target_chat_id, user.telegram_id,
+            )
 
         keyboard = build_search_results_keyboard(result, task_id)
-        # BUG FIX: wrap in _safe_edit_markup to swallow 'message is not modified'
-        await _safe_edit_markup(callback.message, keyboard)
+        await callback.message.edit_reply_markup(reply_markup=keyboard)
 
         from infrastructure.database.repositories.user_repo import UserRepository
         from infrastructure.database.session import async_session_factory
@@ -142,7 +141,7 @@ async def handle_download(
     except Exception as e:
         logger.error("Ошибка скачивания трека: %s", e)
         keyboard = build_search_results_keyboard(result, task_id)
-        await _safe_edit_markup(callback.message, keyboard)
+        await callback.message.edit_reply_markup(reply_markup=keyboard)
         await callback.answer(_("download-error"), show_alert=True)
 
 
@@ -153,9 +152,8 @@ async def handle_pagination(
     queue: QueueManager,
     _: Callable,
 ) -> None:
-    parts   = callback.data.split(":", 2)
-    task_id = parts[1]
-    page    = int(parts[2])
+    _, task_id, page_str = callback.data.split(":", 2)
+    page = int(page_str)
 
     old_result = _results_cache.get(task_id)
     if not old_result:
@@ -172,7 +170,7 @@ async def handle_pagination(
         _results_cache[task_id] = result
 
         keyboard = build_search_results_keyboard(result, task_id)
-        await _safe_edit_markup(callback.message, keyboard)
+        await callback.message.edit_reply_markup(reply_markup=keyboard)
 
     except Exception as e:
         logger.error("Ошибка пагинации: %s", e)

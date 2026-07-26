@@ -54,7 +54,6 @@ def _parse_search_message(msg: Message) -> _ParsedResult:
     logger.debug("[parse] msg_id=%d text_len=%d has_markup=%s",
                  msg.id, len(text), bool(msg.reply_markup))
 
-    # Общее кол-во результатов: "Результаты 1-8 из 1000"
     total_match = re.search(r"Результаты\s+(\d+)-(\d+)\s+из\s+(\d+)", text)
     if total_match:
         start = int(total_match.group(1))
@@ -67,8 +66,7 @@ def _parse_search_message(msg: Message) -> _ParsedResult:
     else:
         logger.warning("[parse] строка 'Результаты ...' не найдена в тексте сообщения")
 
-    # Кнопки: каждая кнопка с числом (1-8) содержит callback_data трека
-    button_map: dict[int, str] = {}  # номер → callback_data
+    button_map: dict[int, str] = {}
     if msg.reply_markup:
         for row in msg.reply_markup.inline_keyboard:
             for btn in row:
@@ -78,13 +76,12 @@ def _parse_search_message(msg: Message) -> _ParsedResult:
                                  btn.text, btn.callback_data)
     logger.debug("[parse] всего кнопок с треками: %d", len(button_map))
 
-    # Строки треков: "1. Artist - Title  HH:MM  XXM  128k"
     line_pattern = re.compile(
-        r"^(\d+)\.\s+(.+?)\s+"             # номер + название
-        r"(\d+:\d{2})\s+"                   # длительность MM:SS или HH:MM:SS
-        r"([\d.]+)M\s+"                     # размер в МБ
-        r"(\d+)k"                           # битрейт
-        r"(\s+Lossless)?",                  # опциональный Lossless
+        r"^(\d+)\.\s+(.+?)\s+"
+        r"(\d+:\d{2})\s+"
+        r"([\d.]+)M\s+"
+        r"(\d+)k"
+        r"(\s+Lossless)?",
         re.MULTILINE,
     )
 
@@ -121,12 +118,7 @@ def _parse_search_message(msg: Message) -> _ParsedResult:
         ))
 
     logger.debug("[parse] итог: %d треков распаршено", len(tracks))
-    return _ParsedResult(
-        tracks=tracks,
-        total=total,
-        page=page,
-        has_next=has_next,
-    )
+    return _ParsedResult(tracks=tracks, total=total, page=page, has_next=has_next)
 
 
 def _parse_duration(s: str) -> int:
@@ -150,7 +142,9 @@ class VKMusicBotSource(MusicSource):
       2. Дождаться ответа с inline-кнопками
       3. Нажать кнопку нужного трека (click callback_data)
       4. Дождаться сообщения с аудио
-      5. Вернуть file_id для пересылки
+      5a. Если target_chat_id задан: userbot пересылает аудио напрямую в чат
+          пользователя (already_sent=True)
+      5b. Иначе: возвращаем file_id для пересылки ботом
     """
 
     name         = "VK Music Bot"
@@ -200,7 +194,6 @@ class VKMusicBotSource(MusicSource):
             raise SourceUnavailableError(str(e)) from e
 
     async def _search_internal(self, query: str, page: int) -> SearchResult:
-        # Запоминаем prev_id ДО отправки запроса
         prev_id = await self._get_last_message_id()
         logger.debug("[search_internal] prev_id=%d  отправляем запрос=%r", prev_id, query)
 
@@ -236,17 +229,24 @@ class VKMusicBotSource(MusicSource):
 
     # ── Получение аудио ──────────────────────────────────────────────────────
 
-    async def get_audio(self, track: Track) -> AudioFile:
-        logger.info("[get_audio] начало  artist=%r  title=%r  source_track_id=%r",
-                    track.artist, track.title, track.source_track_id)
+    async def get_audio(
+        self,
+        track: Track,
+        target_chat_id: int | None = None,
+    ) -> AudioFile:
+        logger.info(
+            "[get_audio] начало  artist=%r  title=%r  "
+            "source_track_id=%r  target_chat_id=%s",
+            track.artist, track.title, track.source_track_id, target_chat_id,
+        )
         start = time.monotonic()
         try:
-            audio = await self._get_audio_internal(track)
+            audio = await self._get_audio_internal(track, target_chat_id)
             elapsed = (time.monotonic() - start) * 1000
             self.record_success(elapsed)
             logger.info(
-                "[get_audio] аудио получено  file_id=%r  за=%.0fms",
-                audio.telegram_file_id, elapsed,
+                "[get_audio] успех  file_id=%r  already_sent=%s  за=%.0fms",
+                audio.telegram_file_id, audio.already_sent, elapsed,
             )
             return audio
         except FloodWait as e:
@@ -262,7 +262,11 @@ class VKMusicBotSource(MusicSource):
             logger.exception("[get_audio] неожиданная ошибка  track=%r", track.title)
             raise SourceUnavailableError(str(e)) from e
 
-    async def _get_audio_internal(self, track: Track) -> AudioFile:
+    async def _get_audio_internal(
+        self,
+        track: Track,
+        target_chat_id: int | None = None,
+    ) -> AudioFile:
         if not track.source_track_id:
             logger.error("[get_audio_internal] source_track_id пустой для %r", track.title)
             raise TrackNotFoundError(
@@ -297,11 +301,45 @@ class VKMusicBotSource(MusicSource):
 
         a = audio_msg.audio
         logger.debug(
-            "[get_audio_internal] аудио msg_id=%d  file_id=%r  "
+            "[get_audio_internal] аудио получено  msg_id=%d  file_id=%r  "
             "performer=%r  title=%r  duration=%ds  size=%dB",
             audio_msg.id, a.file_id, a.performer, a.title, a.duration or 0, a.file_size or 0,
         )
 
+        # ──────────────────────────────────────────────────────────────────
+        # Если задан target_chat_id — userbot сам пересылает аудио пользователю.
+        # file_id пользовательского аккаунта Telegram нельзя использовать через
+        # aiogram-бот напрямую — файл должен быть реально отправлен через тот же
+        # userbot, который его получил.
+        # ──────────────────────────────────────────────────────────────────
+        if target_chat_id:
+            logger.info(
+                "[get_audio_internal] пересылаем аудио в чат пользователя  "
+                "target_chat_id=%d  from_chat=%s  msg_id=%d",
+                target_chat_id, self.bot_username, audio_msg.id,
+            )
+            sent = await self._client.copy_message(
+                chat_id=target_chat_id,
+                from_chat_id=self.bot_username,
+                message_id=audio_msg.id,
+            )
+            logger.info(
+                "[get_audio_internal] аудио отправлено пользователю  "
+                "sent_msg_id=%d  target_chat_id=%d",
+                sent.id, target_chat_id,
+            )
+            sent_audio = sent.audio
+            return AudioFile(
+                telegram_file_id=sent_audio.file_id if sent_audio else a.file_id,
+                telegram_unique_id=sent_audio.file_unique_id if sent_audio else a.file_unique_id,
+                title=sent_audio.title if sent_audio else (a.title or track.title),
+                artist=sent_audio.performer if sent_audio else (a.performer or track.artist),
+                duration=sent_audio.duration if sent_audio else (a.duration or track.duration),
+                size=sent_audio.file_size if sent_audio else (a.file_size or track.size),
+                already_sent=True,
+            )
+
+        # target_chat_id не задан — просто возвращаем file_id
         return AudioFile(
             telegram_file_id=a.file_id,
             telegram_unique_id=a.file_unique_id,
@@ -309,6 +347,7 @@ class VKMusicBotSource(MusicSource):
             artist=a.performer or track.artist,
             duration=a.duration or track.duration,
             size=a.file_size or track.size,
+            already_sent=False,
         )
 
     # ── Health Check ─────────────────────────────────────────────────────────
@@ -363,7 +402,6 @@ class VKMusicBotSource(MusicSource):
     # ── Вспомогательные методы ────────────────────────────────────────────
 
     async def _get_last_message_id(self) -> int:
-        """Возвращает ID последнего сообщения в чате с ботом."""
         async for m in self._client.get_chat_history(self.bot_username, limit=1):
             logger.debug("[get_last_msg_id] last_id=%d", m.id)
             return m.id
@@ -376,10 +414,6 @@ class VKMusicBotSource(MusicSource):
         has_markup: bool = False,
         timeout: float = 12.0,
     ) -> Message | None:
-        """
-        Ожидает новое сообщение от бота методом polling.
-        prev_id — ID последнего сообщения ДО отправки запроса.
-        """
         logger.debug("[wait_reply] начало  prev_id=%d  has_markup=%s  timeout=%.1fs",
                      prev_id, has_markup, timeout)
         deadline = time.monotonic() + timeout
@@ -395,16 +429,11 @@ class VKMusicBotSource(MusicSource):
 
             async for m in self._client.get_chat_history(self.bot_username, limit=3):
                 logger.debug(
-                    "[wait_reply]   msg_id=%d  has_text=%s  has_markup=%s  "
-                    "is_new=%s",
-                    m.id,
-                    bool(m.text),
-                    bool(m.reply_markup),
-                    m.id > last_seen_id,
+                    "[wait_reply]   msg_id=%d  has_text=%s  has_markup=%s  is_new=%s",
+                    m.id, bool(m.text), bool(m.reply_markup), m.id > last_seen_id,
                 )
                 if m.id <= last_seen_id:
                     break
-                # Новое сообщение
                 if has_markup and not m.reply_markup:
                     logger.debug(
                         "[wait_reply]   msg_id=%d — новое, но без кнопок, пропускаем  text=%r",
@@ -421,10 +450,6 @@ class VKMusicBotSource(MusicSource):
         return None
 
     async def _wait_for_audio(self, prev_id: int, timeout: float = 20.0) -> Message | None:
-        """
-        Ждёт сообщение с аудио от бота.
-        prev_id — ID последнего сообщения ДО нажатия кнопки.
-        """
         logger.debug("[wait_audio] начало  prev_id=%d  timeout=%.1fs", prev_id, timeout)
         deadline = time.monotonic() + timeout
         poll_count = 0
@@ -439,11 +464,7 @@ class VKMusicBotSource(MusicSource):
                 logger.debug(
                     "[wait_audio]   msg_id=%d  has_audio=%s  has_text=%s  "
                     "has_caption=%s  id>prev=%s",
-                    m.id,
-                    bool(m.audio),
-                    bool(m.text),
-                    bool(m.caption),
-                    m.id > prev_id,
+                    m.id, bool(m.audio), bool(m.text), bool(m.caption), m.id > prev_id,
                 )
                 if m.id > prev_id and m.audio:
                     logger.info(
@@ -457,7 +478,6 @@ class VKMusicBotSource(MusicSource):
         return None
 
     async def _get_last_search_message(self) -> Message | None:
-        """Возвращает последнее сообщение с inline-кнопками (результаты поиска)."""
         logger.debug("[get_last_search_msg] ищем сообщение с кнопками (limit=5)")
         async for m in self._client.get_chat_history(self.bot_username, limit=5):
             has_markup = bool(m.reply_markup)

@@ -2,17 +2,18 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-# ─── Data Transfer Objects ────────────────────────────────────────────────────
+
+# ─── Data Transfer Objects ─────────────────────────────────────────────────
 
 @dataclass
 class Track:
     """Единый формат трека для всех источников."""
     title: str
-    duration: int          # секунды
-    size: int              # байты
-    source_track_id: str   # внутренний ID в источнике (callback_data и т.п.)
+    duration: int           # секунды
+    size: int               # байты
+    source_track_id: str    # внутренний ID в источнике (callback_data и т.п.)
     artist: str = ""
-    bitrate: int = 0       # kbps
+    bitrate: int = 0        # kbps
     is_lossless: bool = False
     thumbnail_url: str = ""
     raw: dict = field(default_factory=dict)  # оригинальный ответ источника
@@ -28,10 +29,9 @@ class AudioFile:
     duration: int
     size: int
     file_path: str | None = None  # если скачан локально
-    # BUG FIX: when the userbot delivers audio directly via copy_message,
-    # the main bot does not need to call answer_audio — the audio is already
-    # in the user's chat.  Set this flag so the handler knows to skip sending.
-    delivered: bool = False
+    # Если True — userbot уже отправил файл пользователю напрямую,
+    # aiogram-бот не должен повторно отправлять аудио
+    already_sent: bool = False
 
 
 @dataclass
@@ -43,24 +43,26 @@ class SearchResult:
     has_next: bool = False
     source_name: str = ""
     query: str = ""
-    fetched_at: datetime = field(
-        default_factory=lambda: datetime.now(timezone.utc)
-    )
+    fetched_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-# ─── Exceptions ───────────────────────────────────────────────────────────────
+# ─── Exceptions ───────────────────────────────────────────────────────────────────
 
 class SourceError(Exception):
     """Базовая ошибка источника."""
 
+
 class SourceUnavailableError(SourceError):
     """Источник недоступен."""
+
 
 class SourceTimeoutError(SourceError):
     """Источник не ответил в отведённое время."""
 
+
 class TrackNotFoundError(SourceError):
     """Трек не найден."""
+
 
 class SourceFloodWaitError(SourceError):
     """Источник вернул FloodWait."""
@@ -69,7 +71,7 @@ class SourceFloodWaitError(SourceError):
         super().__init__(f"FloodWait: {seconds}s")
 
 
-# ─── Abstract Base ────────────────────────────────────────────────────────────
+# ─── Abstract Base ───────────────────────────────────────────────────────────────────
 
 class MusicSource(ABC):
     """
@@ -77,11 +79,13 @@ class MusicSource(ABC):
 
     Чтобы добавить новый источник — создай файл sources/my_source.py,
     унаследуй MusicSource и реализуй все абстрактные методы.
+    Больше ничего менять не нужно.
     """
 
-    name: str          # "VK Music Bot"
-    bot_username: str  # "vkmusic_bot"
-    source_type: str   # "telegram_bot" | "api" | "database"
+    # Обязательные атрибуты класса
+    name: str           # "VK Music Bot"
+    bot_username: str   # "vkmusic_bot"
+    source_type: str    # "telegram_bot" | "api" | "database"
 
     def __init__(
         self,
@@ -106,18 +110,16 @@ class MusicSource(ABC):
     @abstractmethod
     async def get_audio(
         self,
-        track: "Track",
+        track: Track,
         target_chat_id: int | None = None,
-    ) -> "AudioFile":
+    ) -> AudioFile:
         """
         Получить аудиофайл по треку.
 
-        Args:
-            track: трек для получения аудио.
-            target_chat_id: если передан, источник доставляет аудио
-                напрямую в этот чат (userbot copy_message) и устанавливает
-                AudioFile.delivered = True.  Главный бот в этом случае
-                не должен вызывать answer_audio.
+        target_chat_id — Telegram chat_id пользователя. Если указан,
+        userbot перешлёт аудио напрямую в чат пользователя
+        и возвращает AudioFile с already_sent=True.
+        aiogram-бот в этом случае не должен повторно отправлять файл.
         """
         ...
 
@@ -126,13 +128,13 @@ class MusicSource(ABC):
         """Проверка доступности источника."""
         ...
 
-    # ── Опциональные методы ───────────────────────────────────────────────────
+    # ── Опциональные методы ────────────────────────────────────────────────
 
     async def get_page(self, query: str, page: int) -> SearchResult:
-        """Получить конкретную страницу результатов."""
+        """Получить конкретную страницу результатов. По умолчанию = search()."""
         return await self.search(query, page=page)
 
-    # ── Статистика ────────────────────────────────────────────────────────────
+    # ── Статистика ───────────────────────────────────────────────────────
 
     def record_success(self, response_ms: float) -> None:
         self._success_count += 1
