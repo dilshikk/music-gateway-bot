@@ -2,8 +2,6 @@
 Конфигурация приложения через pydantic-settings.
 Читает переменные из .env файла.
 """
-from typing import Annotated
-
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -18,10 +16,7 @@ class Settings(BaseSettings):
 
     # Telegram Bot
     BOT_TOKEN: str
-    # Поддерживает оба формата в .env:
-    #   ADMIN_IDS=123456789
-    #   ADMIN_IDS=[123456789,987654321]
-    #   ADMIN_IDS=123456789,987654321
+    # Поддерживает форматы: 123, [123,456], "123,456"
     ADMIN_IDS: list[int] = Field(default_factory=list)
 
     @field_validator("ADMIN_IDS", mode="before")
@@ -44,6 +39,11 @@ class Settings(BaseSettings):
 
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
+
+    # Псевдоним для обратной совместимости с кодом, который использует settings.redis_url
+    @property
+    def redis_url(self) -> str:
+        return self.REDIS_URL
 
     # Pyrogram
     PYROGRAM_API_ID: int = 0
@@ -76,6 +76,9 @@ class Settings(BaseSettings):
     INLINE_MAX_RESULTS: int = 20
     INLINE_TIMEOUT: float = 8.0
     INLINE_RATE_LIMIT: int = 30
+
+    # Logging
+    LOG_LEVEL: str = "INFO"
 
     # Environment
     ENVIRONMENT: str = "production"
