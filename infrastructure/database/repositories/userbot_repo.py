@@ -26,6 +26,12 @@ class UserbotRepository:
         )
         return result.scalar_one_or_none()
 
+    async def get_by_phone(self, phone: str) -> Userbot | None:
+        result = await self.session.execute(
+            select(Userbot).where(Userbot.phone == phone)
+        )
+        return result.scalar_one_or_none()
+
     async def create(
         self,
         phone: str,
