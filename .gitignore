@@ -10,22 +10,27 @@
 # ==========================
 __pycache__/
 *.py[cod]
+*.pyo
 *.pyd
 *.so
 .Python
 
-# Virtual Environment
+# Virtual Environments
 venv/
 .venv/
+env/
+ENV/
 
+# ==========================
 # Build
+# ==========================
 build/
 dist/
 *.egg-info/
 .eggs/
 
 # ==========================
-# Sessions
+# Telegram Sessions
 # ==========================
 sessions/
 *.session
@@ -44,18 +49,17 @@ logs/
 *.log
 
 # ==========================
-# Tests
+# Cache
 # ==========================
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 .coverage
 coverage.xml
 htmlcov/
-
-# ==========================
-# Linters
-# ==========================
-.mypy_cache/
-.ruff_cache/
+cache/
+tmp/
+temp/
 
 # ==========================
 # IDE
@@ -74,24 +78,19 @@ node_modules/
 docker/ssl/
 
 # ==========================
+# Alembic
+# ==========================
+alembic/versions/__pycache__/
+
+# ==========================
+# Local config
+# ==========================
+config.local.py
+
+# ==========================
 # OS
 # ==========================
 .DS_Store
 Thumbs.db
 *.swp
 *.swo
-
-# Runtime
-tmp/
-temp/
-cache/
-
-# Alembic
-alembic/versions/__pycache__/
-
-# Pyrogram
-*.session
-*.session-journal
-
-# Local configs
-config.local.py
