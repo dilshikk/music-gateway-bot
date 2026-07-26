@@ -46,71 +46,67 @@ async def main() -> None:
     cache = CacheManager(redis)
 
     # ── БД + компоненты ───────────────────────────────────────────────────────
-    db_session = async_session_factory()
-    await db_session.__aenter__()
+    # BUG FIX: раньше здесь открывалась одна db_session на весь lifecycle бота.
+    # Это работало, но после перехода UserbotRepository на session-per-operation
+    # нужно просто передавать фабрику сессий — не открывать сессию вручную.
+    repo = UserbotRepository(session_factory=async_session_factory)
+    pool = UserbotPool(repo)
+    registry = SourceRegistry()
+    registry.register(VKMusicBotSource(client=None, priority=10))  # type: ignore[arg-type]
 
+    search_manager = SearchManager(pool=pool, registry=registry, cache=cache)
+    queue = QueueManager(search_manager=search_manager, cache=cache)
+
+    await pool.start()
+    await queue.start()
+
+    # ── Bot + Dispatcher ──────────────────────────────────────────────────
+    bot = Bot(
+        token=settings.BOT_TOKEN,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
+    dp = Dispatcher(storage=storage)
+
+    dp["cache"] = cache
+    dp["queue"] = queue
+    dp["search_manager"] = search_manager
+    dp["pool"] = pool
+
+    # ── Middlewares ───────────────────────────────────────────────────────
+    dp.message.middleware(ThrottleMiddleware())
+    dp.message.middleware(AuthMiddleware())
+    dp.message.middleware(RateLimitMiddleware(cache))
+    dp.message.middleware(I18nMiddleware())
+    dp.callback_query.middleware(AuthMiddleware())
+    dp.callback_query.middleware(I18nMiddleware())
+
+    # ── Роутеры ───────────────────────────────────────────────────────────
+    # BUG FIX: admin router MUST be first so FSM states (AddUserbotStates,
+    # BroadcastStates) have priority over the catch-all search handler
+    # (F.text & ~F.text.startswith("/")) which would otherwise swallow
+    # every plain-text message including phone numbers and api credentials.
+    dp.include_router(admin.router)
+    dp.include_router(start.router)
+    dp.include_router(subscription.router)
+    dp.include_router(settings_handler.router)
+    dp.include_router(favorites.router)
+    dp.include_router(popular.router)
+    dp.include_router(inline.router)
+    dp.include_router(inline_download.router)
+    dp.include_router(inline_feedback.router)
+    # search router last — its catch-all F.text handler must not intercept
+    # FSM inputs or keyboard button texts handled by routers above
+    dp.include_router(search.router)
+
+    # ── Запуск ────────────────────────────────────────────────────────────
+    logger.info("Бот запущен")
     try:
-        repo = UserbotRepository(db_session)
-        pool = UserbotPool(repo)
-        registry = SourceRegistry()
-        registry.register(VKMusicBotSource(client=None, priority=10))  # type: ignore[arg-type]
-
-        search_manager = SearchManager(pool=pool, registry=registry, cache=cache)
-        queue = QueueManager(search_manager=search_manager, cache=cache)
-
-        await pool.start()
-        await queue.start()
-
-        # ── Bot + Dispatcher ──────────────────────────────────────────────────
-        bot = Bot(
-            token=settings.BOT_TOKEN,
-            default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-        )
-        dp = Dispatcher(storage=storage)
-
-        dp["cache"] = cache
-        dp["queue"] = queue
-        dp["search_manager"] = search_manager
-        dp["pool"] = pool
-
-        # ── Middlewares ───────────────────────────────────────────────────────
-        dp.message.middleware(ThrottleMiddleware())
-        dp.message.middleware(AuthMiddleware())
-        dp.message.middleware(RateLimitMiddleware(cache))
-        dp.message.middleware(I18nMiddleware())
-        dp.callback_query.middleware(AuthMiddleware())
-        dp.callback_query.middleware(I18nMiddleware())
-
-        # ── Роутеры ───────────────────────────────────────────────────────────
-        # BUG FIX: admin router MUST be first so FSM states (AddUserbotStates,
-        # BroadcastStates) have priority over the catch-all search handler
-        # (F.text & ~F.text.startswith("/")) which would otherwise swallow
-        # every plain-text message including phone numbers and api credentials.
-        dp.include_router(admin.router)
-        dp.include_router(start.router)
-        dp.include_router(subscription.router)
-        dp.include_router(settings_handler.router)
-        dp.include_router(favorites.router)
-        dp.include_router(popular.router)
-        dp.include_router(inline.router)
-        dp.include_router(inline_download.router)
-        dp.include_router(inline_feedback.router)
-        # search router last — its catch-all F.text handler must not intercept
-        # FSM inputs or keyboard button texts handled by routers above
-        dp.include_router(search.router)
-
-        # ── Запуск ────────────────────────────────────────────────────────────
-        logger.info("Бот запущен")
-        try:
-            await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
-        finally:
-            await queue.stop()
-            await pool.stop()
-            await bot.session.close()
-            logger.info("Бот остановлен")
-
+        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
-        await db_session.__aexit__(None, None, None)
+        await queue.stop()
+        await pool.stop()
+        await bot.session.close()
+        logger.info("Бот остановлен")
 
 
 if __name__ == "__main__":
