@@ -70,7 +70,6 @@ async def main() -> None:
     # Регистрируем ID userbot-ов для relay-хендлера
     userbot_ids = set()
     for entry in pool.list_userbots():
-        # Получаем Telegram ID аккаунта userbot
         try:
             me = await entry.client.get_me()
             userbot_ids.add(me.id)
@@ -81,7 +80,6 @@ async def main() -> None:
     # ── Dispatcher ─────────────────────────────────────────────────────────────
     dp = Dispatcher(storage=storage)
 
-    # Передаём зависимости через workflow_data
     dp["cache"] = cache
     dp["queue"] = queue
     dp["search_manager"] = search_manager
@@ -96,21 +94,28 @@ async def main() -> None:
     dp.callback_query.middleware(I18nMiddleware())
 
     # ── Роутеры ───────────────────────────────────────────────────────────────
-    # IMPORTANT: relay должен быть ПЕРВЫМ, чтобы перехватить аудио от userbot
-    # до того, как AuthMiddleware попытается зарегистрировать userbot как пользователя.
+    # IMPORTANT: relay должен быть ПЕРВЫМ — перехватывает аудио от userbot
+    # до того, как AuthMiddleware попытается зарегистрировать userbot как юзера.
     dp.include_router(relay.router)
     dp.include_router(start.router)
+
+    # IMPORTANT: favorites / popular / settings должны быть ДО search.router,
+    # иначе их reply-keyboard тексты (⭐ Избранное, 🔥 Popular, ⚙️ Settings)
+    # перехватит широкий фильтр F.text в search и уйдут как поисковые запросы.
+    dp.include_router(favorites.router)
+    dp.include_router(popular.router)
+    dp.include_router(settings_handler.router)
+
     dp.include_router(search.router)
     dp.include_router(subscription.router)
+
     # admin_sources MUST be before admin.router to intercept admin:sources callbacks
     dp.include_router(admin_sources.router)
     dp.include_router(admin.router)
+
     dp.include_router(inline.router)
     dp.include_router(inline_download.router)
     dp.include_router(inline_feedback.router)
-    dp.include_router(settings_handler.router)
-    dp.include_router(favorites.router)
-    dp.include_router(popular.router)
 
     # ── Запуск ────────────────────────────────────────────────────────────────
     logger.info("Бот запущен")
