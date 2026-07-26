@@ -12,7 +12,6 @@ from bot.handlers import relay
 from bot.handlers import admin_sources
 from bot.middlewares.auth import AuthMiddleware
 from bot.middlewares.rate_limit import RateLimitMiddleware
-from bot.middlewares.subscription import SubscriptionMiddleware
 from bot.middlewares.i18n import I18nMiddleware
 from bot.middlewares.throttle import ThrottleMiddleware
 from config.settings import settings
@@ -80,10 +79,13 @@ async def main() -> None:
     # ── Dispatcher ─────────────────────────────────────────────────────────────
     dp = Dispatcher(storage=storage)
 
+    # Передаём зависимости через workflow_data
     dp["cache"] = cache
     dp["queue"] = queue
     dp["search_manager"] = search_manager
     dp["pool"] = pool
+    # registry нужен admin_sources для sync_enabled() при тогле ON/OFF
+    dp["registry"] = registry
 
     # ── Middlewares ────────────────────────────────────────────────────────────
     dp.message.middleware(ThrottleMiddleware())
