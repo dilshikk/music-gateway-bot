@@ -1,6 +1,7 @@
 import logging
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -13,14 +14,22 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from bot.filters.admin import IsAdmin
-from config.settings import settings
 from core.cache_manager import CacheManager
 from core.queue_manager import QueueManager
 from core.userbot_pool import UserbotPool
-from infrastructure.database.models import AdminRole
 
 logger = logging.getLogger(__name__)
 router = Router(name="admin")
+
+
+async def _safe_edit(callback: CallbackQuery, text: str, reply_markup=None) -> None:
+    """Edit message, ignoring 'message is not modified' errors on double-tap."""
+    try:
+        await callback.message.edit_text(text, reply_markup=reply_markup)
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            raise
+
 
 # ── FSM States ────────────────────────────────────────────────────────────────
 
@@ -95,9 +104,9 @@ async def admin_userbots(callback: CallbackQuery, pool: UserbotPool) -> None:
         InlineKeyboardButton(text="🔙 Назад", callback_data="admin:back"),
     )
 
-    await callback.message.edit_text(
-        f" 🤖 Userbot'ы ({len(entries)} шт.)\n\n"
-        "Выберите для управления:",
+    await _safe_edit(
+        callback,
+        f" 🤖 Userbot'ы ({len(entries)} шт.)\n\nВыберите для управления:",
         reply_markup=builder.as_markup(),
     )
     await callback.answer()
@@ -139,7 +148,7 @@ async def admin_userbot_detail(
         [InlineKeyboardButton(text="🔙 Назад", callback_data="admin:userbots")],
     ])
 
-    await callback.message.edit_text(text, reply_markup=keyboard)
+    await _safe_edit(callback, text, reply_markup=keyboard)
     await callback.answer()
 
 @router.callback_query(F.data.startswith("admin:ub:enable:"), IsAdmin())
@@ -191,16 +200,22 @@ async def admin_ub_add_api_hash(message: Message, state: FSMContext) -> None:
     await state.set_state(AddUserbotStates.waiting_session)
     await message.answer(
         "📋 Введите session_string:\n\n"
-        " Получить можно через: python -c \"from pyrogram import Client; "
-        "Client('s').start()\" "
+        "Получить можно через команду на сервере:\n"
+        "<code>python3 -c \"\n"
+        "from pyrogram import Client\n"
+        "import asyncio\n"
+        "async def gen():\n"
+        "    async with Client('s', api_id=API_ID, api_hash='API_HASH') as c:\n"
+        "        print(await c.export_session_string())\n"
+        "asyncio.run(gen())\n"
+        "\"</code>"
     )
 
 @router.message(AddUserbotStates.waiting_session, IsAdmin())
 async def admin_ub_add_session(
     message: Message,
     state: FSMContext,
-    # BUG FIX: pool must be injected by aiogram via dp["pool"],
-    # not fetched via message.bot.get("pool") — Bot has no .get() method
+    # BUG FIX: inject via aiogram DI from dp["pool"], NOT message.bot.get()
     pool: UserbotPool,
 ) -> None:
     data = await state.get_data()
@@ -256,7 +271,8 @@ async def admin_stats(
         f" {i+1}. {q} ({int(c)})" for i, (q, c) in enumerate(popular)
     ) or " —"
 
-    await callback.message.edit_text(
+    await _safe_edit(
+        callback,
         " 📊 Статистика \n\n"
         " Userbots: \n"
         f" 🟢 Свободных: {pool_stats['idle']}\n"
