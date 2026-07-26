@@ -1,27 +1,97 @@
+# ==========================
+# Environment
+# ==========================
 .env
 .env.*
 !.env.example
-sessions/
-logs/
+
+# ==========================
+# Python
+# ==========================
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
 *.pyd
+*.so
 .Python
-*.egg-info/
-dist/
+
+# Virtual Environment
+venv/
+.venv/
+
+# Build
 build/
+dist/
+*.egg-info/
 .eggs/
+
+# ==========================
+# Sessions
+# ==========================
+sessions/
+*.session
+*.session-journal
+
+# ==========================
+# Database
+# ==========================
+*.sqlite3
+*.db
+
+# ==========================
+# Logs
+# ==========================
+logs/
+*.log
+
+# ==========================
+# Tests
+# ==========================
 .pytest_cache/
-.mypy_cache/
-.ruff_cache/
-htmlcov/
 .coverage
 coverage.xml
-*.log
+htmlcov/
+
+# ==========================
+# Linters
+# ==========================
+.mypy_cache/
+.ruff_cache/
+
+# ==========================
+# IDE
+# ==========================
+.vscode/
+.idea/
+
+# ==========================
+# Node
+# ==========================
+node_modules/
+
+# ==========================
+# Docker
+# ==========================
+docker/ssl/
+
+# ==========================
+# OS
+# ==========================
 .DS_Store
 Thumbs.db
 *.swp
 *.swo
-node_modules/
-docker/ssl/
+
+# Runtime
+tmp/
+temp/
+cache/
+
+# Alembic
+alembic/versions/__pycache__/
+
+# Pyrogram
+*.session
+*.session-journal
+
+# Local configs
+config.local.py
