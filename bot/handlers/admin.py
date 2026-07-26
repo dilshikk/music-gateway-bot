@@ -22,7 +22,7 @@ from core.userbot_pool import UserbotPool
 logger = logging.getLogger(__name__)
 router = Router(name="admin")
 
-_BACK_BTN = [[InlineKeyboardButton(text="🔙 Назад", callback_data="admin:back")]]
+_BACK_BTN = [[InlineKeyboardButton(text="Nazad", callback_data="admin:back")]]
 
 # Log file sits at project root (two levels above bot/handlers/admin.py)
 _LOG_PATH = os.path.join(
@@ -60,10 +60,10 @@ class AddUserbotStates(StatesGroup):
 
 
 class BroadcastStates(StatesGroup):
-    waiting_photo   = State()   # шаг 1: фото (или /skip)
-    waiting_caption = State()   # шаг 2: текст / подпись
-    waiting_link    = State()   # шаг 3: ссылка «Название|https://…» (или /skip)
-    preview         = State()   # шаг 4: предпросмотр → подтвердить / отменить
+    waiting_photo   = State()
+    waiting_caption = State()
+    waiting_link    = State()
+    preview         = State()
 
 
 # ── Главное меню ─────────────────────────────────────────────────────────────
@@ -75,28 +75,34 @@ async def cmd_admin(message: Message, pool: UserbotPool, queue: QueueManager) ->
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="🤖 Userbot'ы", callback_data="admin:userbots"),
-            InlineKeyboardButton(text="📡 Источники",  callback_data="admin:sources"),
+            InlineKeyboardButton(text="Userbots",   callback_data="admin:userbots"),
+            InlineKeyboardButton(text="Istochniki", callback_data="admin:sources"),
         ],
         [
-            InlineKeyboardButton(text="📢 Каналы",   callback_data="admin:channels"),
-            InlineKeyboardButton(text="👥 Пользов.",  callback_data="admin:users"),
+            InlineKeyboardButton(text="Kanaly",      callback_data="admin:channels"),
+            InlineKeyboardButton(text="Polzovateli", callback_data="admin:users"),
         ],
         [
-            InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats"),
-            InlineKeyboardButton(text="📋 Логи",      callback_data="admin:logs"),
+            InlineKeyboardButton(text="Statistika", callback_data="admin:stats"),
+            InlineKeyboardButton(text="Logi",        callback_data="admin:logs"),
         ],
         [
-            InlineKeyboardButton(text="📣 Рассылка", callback_data="admin:broadcast"),
+            InlineKeyboardButton(text="Rassylka", callback_data="admin:broadcast"),
         ],
     ])
 
     await message.answer(
-        " 🛠 Панель администратора \n\n"
-        f"🤖 Userbot: {pool_stats['idle']} свободных / {pool_stats['total']} всего\n"
-        f"⏳ Очередь: {queue_stats.get('queue_size', 0)} запросов\n"
-        f"🔴 FloodWait: {pool_stats['flood']}\n"
-        f"❌ Ошибок: {pool_stats['error']}",
+        "=== Admin Panel ===\n\n"
+        "Userbots: {idle} svobodnyh / {total} vsego\n"
+        "Ochered: {queue_size} zaprosov\n"
+        "FloodWait: {flood}\n"
+        "Oshibok: {error}".format(
+            idle=pool_stats["idle"],
+            total=pool_stats["total"],
+            queue_size=queue_stats.get("queue_size", 0),
+            flood=pool_stats["flood"],
+            error=pool_stats["error"],
+        ),
         reply_markup=keyboard,
     )
 
@@ -107,21 +113,29 @@ async def cmd_admin(message: Message, pool: UserbotPool, queue: QueueManager) ->
 async def admin_userbots(callback: CallbackQuery, pool: UserbotPool) -> None:
     entries = pool.list_userbots()
     builder = InlineKeyboardBuilder()
+    STATUS_LABELS = {
+        "idle": "[OK]", "busy": "[..]", "flood_wait": "[FW]",
+        "error": "[ER]", "disabled": "[--]", "offline": "[OF]",
+    }
     for entry in entries:
-        status_icon = {
-            "idle": "🟢", "busy": "🟡", "flood_wait": "🔴",
-            "error": "❌", "disabled": "⚫", "offline": "🔘",
-        }.get(entry.model.status.value, "❓")
+        label = STATUS_LABELS.get(entry.model.status.value, "[?]")
         builder.row(InlineKeyboardButton(
-            text=f"{status_icon} #{entry.id} {entry.model.phone}",
-            callback_data=f"admin:ub:{entry.id}",
+            text="{label} #{eid} {phone}".format(
+                label=label, eid=entry.id, phone=entry.model.phone
+            ),
+            callback_data="admin:ub:{id}".format(id=entry.id),
         ))
     builder.row(
-        InlineKeyboardButton(text="➕ Добавить", callback_data="admin:ub:add"),
-        InlineKeyboardButton(text="🔙 Назад",    callback_data="admin:back"),
+        InlineKeyboardButton(text="[+] Dobavit", callback_data="admin:ub:add"),
+        InlineKeyboardButton(text="<< Nazad",    callback_data="admin:back"),
     )
-    await _safe_edit(callback, f" 🤖 Userbot'ы ({len(entries)} шт.)\n\nВыберите для управления:",
-                     reply_markup=builder.as_markup())
+    await _safe_edit(
+        callback,
+        "=== Userbots ({count} sht.) ===\n\nVyberite dlya upravleniya:".format(
+            count=len(entries)
+        ),
+        reply_markup=builder.as_markup(),
+    )
     await callback.answer()
 
 
@@ -130,30 +144,43 @@ async def admin_userbot_detail(callback: CallbackQuery, pool: UserbotPool) -> No
     ub_id = int(callback.data.split(":")[-1])
     entry = next((e for e in pool.list_userbots() if e.id == ub_id), None)
     if not entry:
-        await callback.answer("❌ Не найдено", show_alert=True)
+        await callback.answer("Ne naydeno", show_alert=True)
         return
     m = entry.model
-    text = (
-        f" Userbot #{m.id} \n\n"
-        f"📱 Телефон: {m.phone}\n"
-        f"📊 Статус: {m.status.value}\n"
-        f"⚖️ Вес: {m.weight}\n"
-        f"📈 Сегодня: {m.requests_today}/{m.daily_limit}\n"
-        f"📊 Всего: {m.requests_total}\n"
-        f"⚠️ Ошибок: {m.error_count}\n"
-    )
+    flood_line = ""
     if m.flood_wait_until:
-        text += f"🚫 FloodWait до: {m.flood_wait_until.strftime('%H:%M:%S')}\n"
+        flood_line = "\nFloodWait do: {t}".format(
+            t=m.flood_wait_until.strftime("%H:%M:%S")
+        )
+    text = (
+        "=== Userbot #{id} ===\n\n"
+        "Telefon: {phone}\n"
+        "Status: {status}\n"
+        "Ves: {weight}\n"
+        "Segodnya: {today}/{limit}\n"
+        "Vsego: {total}\n"
+        "Oshibok: {errors}{flood}"
+    ).format(
+        id=m.id,
+        phone=m.phone,
+        status=m.status.value,
+        weight=m.weight,
+        today=m.requests_today,
+        limit=m.daily_limit,
+        total=m.requests_total,
+        errors=m.error_count,
+        flood=flood_line,
+    )
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="✅ Включить",  callback_data=f"admin:ub:enable:{ub_id}"),
-            InlineKeyboardButton(text="⛔ Выключить", callback_data=f"admin:ub:disable:{ub_id}"),
+            InlineKeyboardButton(text="[ON]  Vkl",  callback_data="admin:ub:enable:{id}".format(id=ub_id)),
+            InlineKeyboardButton(text="[OFF] Vykl", callback_data="admin:ub:disable:{id}".format(id=ub_id)),
         ],
         [
-            InlineKeyboardButton(text="🔄 Перезапуск",  callback_data=f"admin:ub:restart:{ub_id}"),
-            InlineKeyboardButton(text="🗑 Удалить",    callback_data=f"admin:ub:delete:{ub_id}"),
+            InlineKeyboardButton(text="[R] Restart", callback_data="admin:ub:restart:{id}".format(id=ub_id)),
+            InlineKeyboardButton(text="[X] Udalit",  callback_data="admin:ub:delete:{id}".format(id=ub_id)),
         ],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="admin:userbots")],
+        [InlineKeyboardButton(text="<< Nazad", callback_data="admin:userbots")],
     ])
     await _safe_edit(callback, text, reply_markup=keyboard)
     await callback.answer()
@@ -163,31 +190,33 @@ async def admin_userbot_detail(callback: CallbackQuery, pool: UserbotPool) -> No
 async def admin_ub_enable(callback: CallbackQuery, pool: UserbotPool) -> None:
     ub_id = int(callback.data.split(":")[-1])
     await pool.enable_userbot(ub_id)
-    await callback.answer(f"✅ Userbot #{ub_id} включён", show_alert=True)
+    await callback.answer("Userbot #{id} vklyuchen".format(id=ub_id), show_alert=True)
 
 
 @router.callback_query(F.data.startswith("admin:ub:disable:"), IsAdmin())
 async def admin_ub_disable(callback: CallbackQuery, pool: UserbotPool) -> None:
     ub_id = int(callback.data.split(":")[-1])
     await pool.disable_userbot(ub_id)
-    await callback.answer(f"⛔ Userbot #{ub_id} выключен", show_alert=True)
+    await callback.answer("Userbot #{id} vyklyuchen".format(id=ub_id), show_alert=True)
 
 
 @router.callback_query(F.data.startswith("admin:ub:restart:"), IsAdmin())
 async def admin_ub_restart(callback: CallbackQuery, pool: UserbotPool) -> None:
     ub_id = int(callback.data.split(":")[-1])
-    await callback.answer("🔄 Перезапускаю...")
+    await callback.answer("Perezapuskayu...")
     ok = await pool.restart_userbot(ub_id)
-    await callback.message.answer(
-        f"{"✅ Перезапущен" if ok else "❌ Ошибка"}: Userbot #{ub_id}"
-    )
+    # BUG FIX: Python 3.10 does not allow quotes inside f-string expressions.
+    # Use a plain variable instead of f"{expr_with_quotes}".
+    status_text = "Userbot #{id} perezapushchen".format(id=ub_id) if ok \
+        else "Oshibka perezapuska userbot #{id}".format(id=ub_id)
+    await callback.message.answer(status_text)
 
 
 @router.callback_query(F.data.startswith("admin:ub:delete:"), IsAdmin())
 async def admin_ub_delete(callback: CallbackQuery, pool: UserbotPool) -> None:
     ub_id = int(callback.data.split(":")[-1])
     await pool.remove_userbot(ub_id)
-    await callback.answer(f"🗑 Userbot #{ub_id} удалён", show_alert=True)
+    await callback.answer("Userbot #{id} udalyon".format(id=ub_id), show_alert=True)
     await admin_userbots(callback, pool)
 
 
@@ -196,58 +225,61 @@ async def admin_ub_delete(callback: CallbackQuery, pool: UserbotPool) -> None:
 @router.callback_query(F.data == "admin:ub:add", IsAdmin())
 async def admin_ub_add_start(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(AddUserbotStates.waiting_phone)
-    await callback.message.answer("📱 Введите номер телефона (формат: +79991234567):")
+    await callback.message.answer("Vvedite nomer telefona (format: +79991234567):")
     await callback.answer()
 
 @router.message(AddUserbotStates.waiting_phone, IsAdmin())
 async def admin_ub_add_phone(message: Message, state: FSMContext) -> None:
     await state.update_data(phone=message.text.strip())
     await state.set_state(AddUserbotStates.waiting_api_id)
-    await message.answer("🔑 Введите api_id (число):")
+    await message.answer("Vvedite api_id (chislo):")
 
 @router.message(AddUserbotStates.waiting_api_id, IsAdmin())
 async def admin_ub_add_api_id(message: Message, state: FSMContext) -> None:
     if not message.text or not message.text.strip().isdigit():
-        await message.answer("❌ api_id должен быть числом. Попробуйте ещё раз:")
+        await message.answer("api_id dolzhen byt chislom. Poprobuite eshche raz:")
         return
     await state.update_data(api_id=int(message.text.strip()))
     await state.set_state(AddUserbotStates.waiting_api_hash)
-    await message.answer("🔑 Введите api_hash:")
+    await message.answer("Vvedite api_hash:")
 
 @router.message(AddUserbotStates.waiting_api_hash, IsAdmin())
 async def admin_ub_add_api_hash(message: Message, state: FSMContext) -> None:
     await state.update_data(api_hash=message.text.strip())
     await state.set_state(AddUserbotStates.waiting_session)
-    await message.answer("📋 Введите session_string:")
+    await message.answer("Vvedite session_string (iz Pyrogram StringSession):")
 
 @router.message(AddUserbotStates.waiting_session, IsAdmin())
 async def admin_ub_add_session(message: Message, state: FSMContext, pool: UserbotPool) -> None:
     data = await state.get_data()
     await state.clear()
-    session = message.text.strip() if message.text else ""
-    if not session:
-        await message.answer("❌ Session не может быть пустым.")
+    session_str = message.text.strip() if message.text else ""
+    if not session_str:
+        await message.answer("Session ne mozhet byt pustym.")
         return
+    # BUG FIX: use session_factory pattern, not a single closed session
     from infrastructure.database.repositories.userbot_repo import UserbotRepository
     from infrastructure.database.session import async_session_factory
-    async with async_session_factory() as db:
-        repo = UserbotRepository(db)
-        existing = await repo.get_by_phone(data["phone"])
-        if existing:
-            await message.answer(
-                f"⚠️ Userbot с номером {data['phone']} уже существует (#{existing.id}).\n"
-                "Удалите его сначала."
-            )
-            return
-        userbot = await repo.create(
-            phone=data["phone"], api_id=data["api_id"],
-            api_hash=data["api_hash"], session_string=session,
+    repo = UserbotRepository(session_factory=async_session_factory)
+    existing = await repo.get_by_phone(data["phone"])
+    if existing:
+        await message.answer(
+            "Userbot s nomerom {phone} uzhe sushchestvuet (#{eid}).\n"
+            "Udalite ego snachala.".format(phone=data["phone"], eid=existing.id)
         )
-    ok = await pool.add_userbot(userbot.id)
-    await message.answer(
-        f"✅ Userbot #{userbot.id} добавлен и запущен!" if ok
-        else f"⚠️ Userbot #{userbot.id} сохранён, но не запустился. Проверьте session_string."
+        return
+    userbot = await repo.create(
+        phone=data["phone"], api_id=data["api_id"],
+        api_hash=data["api_hash"], session_string=session_str,
     )
+    ok = await pool.add_userbot(userbot.id)
+    if ok:
+        await message.answer("Userbot #{id} dobavlen i zapushchen!".format(id=userbot.id))
+    else:
+        await message.answer(
+            "Userbot #{id} sokhranen, no ne zapustilsya. "
+            "Proverite session_string.".format(id=userbot.id)
+        )
 
 
 # ── Sources ───────────────────────────────────────────────────────────────────
@@ -262,24 +294,38 @@ async def admin_sources(callback: CallbackQuery) -> None:
         sources = await repo.get_all()
     builder = InlineKeyboardBuilder()
     for src in sources:
-        icon   = "🟢" if src.enabled else "🔴"
+        status_label = "ON" if src.enabled else "OFF"
         action = "disable" if src.enabled else "enable"
         builder.row(InlineKeyboardButton(
-            text=f"{icon} {src.name}  |⏱{int(src.avg_response_ms)}ms  ✅{src.success_count} ❌{src.error_count}",
-            callback_data=f"admin:src:{action}:{src.id}",
+            text="[{s}] {name} | avg:{avg}ms ok:{ok} err:{err}".format(
+                s=status_label,
+                name=src.name,
+                avg=int(src.avg_response_ms),
+                ok=src.success_count,
+                err=src.error_count,
+            ),
+            callback_data="admin:src:{action}:{id}".format(action=action, id=src.id),
         ))
-    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="admin:back"))
-    lines = [" 📡 Источники музыки \n"]
+    builder.row(InlineKeyboardButton(text="<< Nazad", callback_data="admin:back"))
+    lines = ["=== Istochniki muzyki ===\n"]
     for src in sources:
-        icon = "🟢" if src.enabled else "🔴"
+        status_label = "ON" if src.enabled else "OFF"
         lines.append(
-            f"{icon} <b>{src.name}</b> (@{src.bot_username})\n"
-            f"   Приоритет: {src.priority} | Таймаут: {src.timeout}с\n"
-            f"   Успешно: {src.success_count} | Ошибок: {src.error_count}\n"
-            f"   Ср. время: {int(src.avg_response_ms)} мс\n"
+            "[{s}] {name} (@{uname})\n"
+            "   Prioritet: {p} | Timeout: {t}s\n"
+            "   OK: {ok} | ERR: {err} | avg: {avg}ms\n".format(
+                s=status_label,
+                name=src.name,
+                uname=src.bot_username,
+                p=src.priority,
+                t=src.timeout,
+                ok=src.success_count,
+                err=src.error_count,
+                avg=int(src.avg_response_ms),
+            )
         )
     if not sources:
-        lines.append("Нет настроенных источников.")
+        lines.append("Net nastroennykh istochnikov.")
     await _safe_edit(callback, "\n".join(lines), reply_markup=builder.as_markup())
     await callback.answer()
 
@@ -289,7 +335,7 @@ async def admin_src_enable(callback: CallbackQuery) -> None:
     from infrastructure.database.session import async_session_factory
     async with async_session_factory() as s:
         await SourceRepository(s).set_enabled(int(callback.data.split(":")[-1]), True)
-    await callback.answer("✅ Источник включён", show_alert=True)
+    await callback.answer("Istochnik vklyuchen", show_alert=True)
     await admin_sources(callback)
 
 @router.callback_query(F.data.startswith("admin:src:disable:"), IsAdmin())
@@ -298,7 +344,7 @@ async def admin_src_disable(callback: CallbackQuery) -> None:
     from infrastructure.database.session import async_session_factory
     async with async_session_factory() as s:
         await SourceRepository(s).set_enabled(int(callback.data.split(":")[-1]), False)
-    await callback.answer("⛔ Источник отключён", show_alert=True)
+    await callback.answer("Istochnik otklyuchen", show_alert=True)
     await admin_sources(callback)
 
 
@@ -327,22 +373,30 @@ async def _show_users_page(callback: CallbackQuery, page: int) -> None:
     builder = InlineKeyboardBuilder()
     for u in users:
         name = u.first_name or u.username or str(u.telegram_id)
+        banned_label = "[BAN]" if u.is_banned else "[OK]"
         builder.row(InlineKeyboardButton(
-            text=f"{"🚫" if u.is_banned else "👤"} {name[:20]} | req:{u.total_requests}",
-            callback_data=f"admin:user:{u.id}",
+            text="{b} {name} | req:{req}".format(
+                b=banned_label, name=name[:20], req=u.total_requests
+            ),
+            callback_data="admin:user:{id}".format(id=u.id),
         ))
     pages = max(1, (total + _USERS_PAGE_SIZE - 1) // _USERS_PAGE_SIZE)
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"admin:users:page:{page-1}"))
-    nav.append(InlineKeyboardButton(text=f"{page+1}/{pages}", callback_data="noop"))
+        nav.append(InlineKeyboardButton(text="<<", callback_data="admin:users:page:{p}".format(p=page - 1)))
+    nav.append(InlineKeyboardButton(text="{cur}/{total}".format(cur=page + 1, total=pages), callback_data="noop"))
     if (page + 1) < pages:
-        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"admin:users:page:{page+1}"))
+        nav.append(InlineKeyboardButton(text=">>", callback_data="admin:users:page:{p}".format(p=page + 1)))
     if nav:
         builder.row(*nav)
-    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="admin:back"))
-    await _safe_edit(callback, f" 👥 Пользователи ({total})\nСтраница {page+1}/{pages}:",
-                     reply_markup=builder.as_markup())
+    builder.row(InlineKeyboardButton(text="<< Nazad", callback_data="admin:back"))
+    await _safe_edit(
+        callback,
+        "=== Polzovateli ({total}) ===\nStranitsa {cur}/{pages}:".format(
+            total=total, cur=page + 1, pages=pages
+        ),
+        reply_markup=builder.as_markup(),
+    )
     await callback.answer()
 
 @router.callback_query(F.data.func(_is_user_detail), IsAdmin())
@@ -353,30 +407,48 @@ async def admin_user_detail(callback: CallbackQuery) -> None:
     async with async_session_factory() as s:
         user = await UserRepository(s).get_by_id(user_id)
     if not user:
-        await callback.answer("❌ Не найден", show_alert=True)
+        await callback.answer("Ne naydeno", show_alert=True)
         return
     name     = user.first_name or user.username or "—"
-    username = f"@{user.username}" if user.username else "—"
-    status   = "🚫 Заблокирован" if user.is_banned else "✅ Активен"
+    username = "@{u}".format(u=user.username) if user.username else "—"
+    status   = "[BAN]" if user.is_banned else "[OK]"
+    premium  = "yes" if user.premium else "no"
     text = (
-        f" 👤 Пользователь #{user.id} \n\n"
-        f"Имя: {name}\nUsername: {username}\n"
-        f"Telegram ID: <code>{user.telegram_id}</code>\n"
-        f"Язык: {user.language.value} | Premium: {'✅' if user.premium else '❌'}\n"
-        f"Статус: {status}\n"
-        f"Запросов: {user.total_requests} (сегодня {user.daily_requests})\n"
-        f"Регистрация: {user.created_at.strftime('%d.%m.%Y %H:%M')}\n"
+        "=== Polzovatel #{id} ===\n\n"
+        "Imya: {name}\n"
+        "Username: {uname}\n"
+        "Telegram ID: {tg_id}\n"
+        "Yazyk: {lang} | Premium: {prem}\n"
+        "Status: {status}\n"
+        "Zaprosov: {total} (segodnya {today})\n"
+        "Registratsiya: {created}\n"
+    ).format(
+        id=user.id,
+        name=name,
+        uname=username,
+        tg_id=user.telegram_id,
+        lang=user.language.value,
+        prem=premium,
+        status=status,
+        total=user.total_requests,
+        today=user.daily_requests,
+        created=user.created_at.strftime("%d.%m.%Y %H:%M"),
     )
     if user.is_banned and user.ban_reason:
-        text += f"Причина бана: {user.ban_reason}\n"
-    ban_btn = (
-        InlineKeyboardButton(text="✅ Разбанить", callback_data=f"admin:user:unban:{user_id}")
-        if user.is_banned
-        else InlineKeyboardButton(text="🚫 Забанить", callback_data=f"admin:user:ban:{user_id}")
-    )
+        text += "Prichina bana: {r}\n".format(r=user.ban_reason)
+    if user.is_banned:
+        ban_btn = InlineKeyboardButton(
+            text="[UN] Razbanit",
+            callback_data="admin:user:unban:{id}".format(id=user_id),
+        )
+    else:
+        ban_btn = InlineKeyboardButton(
+            text="[BAN] Zabanit",
+            callback_data="admin:user:ban:{id}".format(id=user_id),
+        )
     await _safe_edit(callback, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
         [ban_btn],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="admin:users")],
+        [InlineKeyboardButton(text="<< Nazad", callback_data="admin:users")],
     ]))
     await callback.answer()
 
@@ -387,8 +459,8 @@ async def admin_user_ban(callback: CallbackQuery) -> None:
     from infrastructure.database.session import async_session_factory
     async with async_session_factory() as s:
         await UserRepository(s).ban(user_id)
-    await callback.answer("🚫 Заблокирован", show_alert=True)
-    callback.data = f"admin:user:{user_id}"
+    await callback.answer("Zabanen", show_alert=True)
+    callback.data = "admin:user:{id}".format(id=user_id)
     await admin_user_detail(callback)
 
 @router.callback_query(F.data.startswith("admin:user:unban:"), IsAdmin())
@@ -398,8 +470,8 @@ async def admin_user_unban(callback: CallbackQuery) -> None:
     from infrastructure.database.session import async_session_factory
     async with async_session_factory() as s:
         await UserRepository(s).unban(user_id)
-    await callback.answer("✅ Разблокирован", show_alert=True)
-    callback.data = f"admin:user:{user_id}"
+    await callback.answer("Razbanen", show_alert=True)
+    callback.data = "admin:user:{id}".format(id=user_id)
     await admin_user_detail(callback)
 
 
@@ -409,7 +481,7 @@ async def admin_user_unban(callback: CallbackQuery) -> None:
 async def admin_channels(callback: CallbackQuery) -> None:
     await _safe_edit(
         callback,
-        " 📢 Каналы \n\nФункция в разработке.",
+        "=== Kanaly ===\n\nFunktsiya v razrabotke.",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=_BACK_BTN),
     )
     await callback.answer()
@@ -418,7 +490,12 @@ async def admin_channels(callback: CallbackQuery) -> None:
 # ── Stats ─────────────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "admin:stats", IsAdmin())
-async def admin_stats(callback: CallbackQuery, pool: UserbotPool, queue: QueueManager, cache: CacheManager) -> None:
+async def admin_stats(
+    callback: CallbackQuery,
+    pool: UserbotPool,
+    queue: QueueManager,
+    cache: CacheManager,
+) -> None:
     import psutil
     from infrastructure.database.session import async_session_factory
     from sqlalchemy import select, func
@@ -429,22 +506,41 @@ async def admin_stats(callback: CallbackQuery, pool: UserbotPool, queue: QueueMa
     cpu = psutil.cpu_percent(interval=0.1)
     ram = psutil.virtual_memory()
     popular = await cache.get_popular(limit=5)
-    popular_text = "\n".join(f" {i+1}. {q} ({int(c)})" for i, (q, c) in enumerate(popular)) or " —"
+    popular_text = "\n".join(
+        "  {n}. {q} ({c})".format(n=i + 1, q=q, c=int(c))
+        for i, (q, c) in enumerate(popular)
+    ) or "  —"
     async with async_session_factory() as session:
-        total_users   = (await session.execute(select(func.count()).select_from(User))).scalar_one()
+        total_users    = (await session.execute(select(func.count()).select_from(User))).scalar_one()
         total_searches = (await session.execute(select(func.count()).select_from(Search))).scalar_one()
+    redis_label = "OK" if redis_ok else "FAIL"
     await _safe_edit(
         callback,
-        f" 📊 Статистика \n\n"
-        f"🤖 Userbots: 🟢{ps['idle']} 🟡{ps['busy']} 🔴{ps['flood']} ❌{ps['error']} ⚫{ps['disabled']}\n"
-        f"⏳ Очередь: {qs.get('queue_size',0)} / ⚙️{qs.get('processing',0)}\n\n"
-        f"👥 Пользователей: {total_users}\n"
-        f"🔍 Поисков: {total_searches}\n\n"
-        f"💻 CPU: {cpu}% | 🧠 RAM: {ram.percent}% ({ram.used//1024//1024} MB) | 📦 Redis: {'✅' if redis_ok else '❌'}\n\n"
-        f"🔥 Топ запросов:\n{popular_text}",
+        "=== Statistika ===\n\n"
+        "Userbots: idle={idle} busy={busy} fw={flood} err={err} off={dis}\n"
+        "Ochered: {q_size} / processing={proc}\n\n"
+        "Polzovateley: {users}\n"
+        "Poiskov: {searches}\n\n"
+        "CPU: {cpu}% | RAM: {ram_pct}% ({ram_mb} MB) | Redis: {redis}\n\n"
+        "Top zaprosov:\n{popular}".format(
+            idle=ps["idle"],
+            busy=ps["busy"],
+            flood=ps["flood"],
+            err=ps["error"],
+            dis=ps["disabled"],
+            q_size=qs.get("queue_size", 0),
+            proc=qs.get("processing", 0),
+            users=total_users,
+            searches=total_searches,
+            cpu=cpu,
+            ram_pct=ram.percent,
+            ram_mb=ram.used // 1024 // 1024,
+            redis=redis_label,
+            popular=popular_text,
+        ),
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="🔙 Назад",    callback_data="admin:back"),
-            InlineKeyboardButton(text="🔄 Обновить", callback_data="admin:stats"),
+            InlineKeyboardButton(text="<< Nazad",    callback_data="admin:back"),
+            InlineKeyboardButton(text="[R] Obnovit", callback_data="admin:stats"),
         ]]),
     )
     await callback.answer()
@@ -457,7 +553,8 @@ async def admin_logs(callback: CallbackQuery) -> None:
     if not os.path.exists(_LOG_PATH):
         await _safe_edit(
             callback,
-            f"📋 Файл логов не найден.\n<code>{_LOG_PATH}</code>\nПерезапустите бот — файл создастся автоматически.",
+            "Fayl logov ne nayden.\n{path}\n"
+            "Perezapustite bot — fayl sozdastsa avtomaticheski.".format(path=_LOG_PATH),
             reply_markup=InlineKeyboardMarkup(inline_keyboard=_BACK_BTN),
         )
         await callback.answer()
@@ -466,35 +563,33 @@ async def admin_logs(callback: CallbackQuery) -> None:
         lines = f.readlines()
     last = "".join(lines[-40:]).strip()
     if len(last) > 3500:
-        last = "…" + last[-3500:]
+        last = "..." + last[-3500:]
     await _safe_edit(
         callback,
-        f" 📋 Логи ({len(lines)} стр.) \n\n<pre>{last}</pre>",
+        "=== Logi ({n} str.) ===\n\n<pre>{log}</pre>".format(n=len(lines), log=last),
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="🔄 Обновить", callback_data="admin:logs"),
-            InlineKeyboardButton(text="🔙 Назад",    callback_data="admin:back"),
+            InlineKeyboardButton(text="[R] Obnovit", callback_data="admin:logs"),
+            InlineKeyboardButton(text="<< Nazad",    callback_data="admin:back"),
         ]]),
     )
     await callback.answer()
 
 
 # ── Broadcast FSM ─────────────────────────────────────────────────────────────
-# Флоу: фото → текст/подпись → кнопка-ссылка → предпросмотр → отправить / отменить
 
 _BC_CONFIRM_KB = InlineKeyboardMarkup(inline_keyboard=[
     [
-        InlineKeyboardButton(text="✅ Отправить", callback_data="bc:send"),
-        InlineKeyboardButton(text="❌ Отменить", callback_data="bc:cancel"),
+        InlineKeyboardButton(text="[OK] Otpravit", callback_data="bc:send"),
+        InlineKeyboardButton(text="[X]  Otmenit",  callback_data="bc:cancel"),
     ]
 ])
 
 
 def _bc_link_kb(url: str, title: str) -> InlineKeyboardMarkup | None:
-    """Build a one-button inline keyboard for the broadcast link, or None."""
     if not url:
         return None
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=title or "🔗 Перейти", url=url)]
+        [InlineKeyboardButton(text=title or "Perejti", url=url)]
     ])
 
 
@@ -502,31 +597,29 @@ def _bc_link_kb(url: str, title: str) -> InlineKeyboardMarkup | None:
 async def admin_broadcast_start(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(BroadcastStates.waiting_photo)
     await callback.message.answer(
-        "📣 <b>Создание рассылки</b> (1/3)\n\n"
-        "🖼 Отправьте <b>фото</b> для рассылки.\n"
-        "Или напишите /skip чтобы пропустить фото.\n\n"
-        "Отмена: /cancel"
+        "Sozdanie rassylki (1/3)\n\n"
+        "Otpravte foto dlya rassylki.\n"
+        "Ili napishite /skip chtoby propustit foto.\n\n"
+        "Otmena: /cancel"
     )
     await callback.answer()
 
 
 @router.message(BroadcastStates.waiting_photo, IsAdmin())
 async def bc_got_photo(message: Message, state: FSMContext) -> None:
-    # Skip command
     if message.text and message.text.strip().lower() in ("/skip", "skip"):
         await state.update_data(photo_id=None)
     elif message.photo:
         await state.update_data(photo_id=message.photo[-1].file_id)
     else:
-        await message.answer("❌ Отправьте фото или /skip:")
+        await message.answer("Otpravte foto ili /skip:")
         return
-
     await state.set_state(BroadcastStates.waiting_caption)
     await message.answer(
-        "📣 <b>Создание рассылки</b> (2/3)\n\n"
-        "📝 Напишите <b>текст</b> рассылки.\n"
-        "Поддерживается HTML-форматирование.\n\n"
-        "Отмена: /cancel"
+        "Sozdanie rassylki (2/3)\n\n"
+        "Napishite tekst rassylki.\n"
+        "Podderzhivaetsya HTML-formatirovanie.\n\n"
+        "Otmena: /cancel"
     )
 
 
@@ -534,26 +627,24 @@ async def bc_got_photo(message: Message, state: FSMContext) -> None:
 async def bc_got_caption(message: Message, state: FSMContext) -> None:
     text = message.text or message.caption or ""
     if not text.strip():
-        await message.answer("❌ Текст не может быть пустым:")
+        await message.answer("Tekst ne mozhet byt pustym:")
         return
     await state.update_data(caption=text)
     await state.set_state(BroadcastStates.waiting_link)
     await message.answer(
-        "📣 <b>Создание рассылки</b> (3/3)\n\n"
-        "🔗 Отправьте ссылку кнопки в формате:\n"
-        "<code>Название кнопки|https://example.com</code>\n\n"
-        "Или /skip чтобы не добавлять кнопку.\n\n"
-        "Отмена: /cancel"
+        "Sozdanie rassylki (3/3)\n\n"
+        "Otpravte ssylku knopki v formate:\n"
+        "Nazvanie knopki|https://example.com\n\n"
+        "Ili /skip chtoby ne dobavlyat knopku.\n\n"
+        "Otmena: /cancel"
     )
 
 
 @router.message(BroadcastStates.waiting_link, IsAdmin())
 async def bc_got_link(message: Message, state: FSMContext) -> None:
     raw = (message.text or "").strip()
-
     link_url   = ""
     link_title = ""
-
     if raw.lower() not in ("/skip", "skip"):
         if "|" in raw:
             parts      = raw.split("|", 1)
@@ -561,54 +652,34 @@ async def bc_got_link(message: Message, state: FSMContext) -> None:
             link_url   = parts[1].strip()
         else:
             link_url   = raw
-            link_title = "🔗 Перейти"
-
+            link_title = "Perejti"
         if link_url and not link_url.startswith(("http://", "https://", "tg://")):
-            await message.answer("❌ Неверный URL. Должен начинаться с http:// или https://\nИли /skip:")
+            await message.answer("Neverniy URL. Dolzhen nachinatsa s http:// ili https://\nIli /skip:")
             return
-
     await state.update_data(link_url=link_url, link_title=link_title)
     await state.set_state(BroadcastStates.preview)
-
-    # Show preview
     data = await state.get_data()
     await _send_bc_preview(message, data)
 
 
 async def _send_bc_preview(message: Message, data: dict) -> None:
-    """Send the broadcast preview to admin with confirm/cancel buttons."""
     photo_id   = data.get("photo_id")
     caption    = data.get("caption", "")
     link_url   = data.get("link_url", "")
-    link_title = data.get("link_title", "🔗 Перейти")
-
-    # Build keyboard for the broadcast message itself
+    link_title = data.get("link_title", "Perejti")
     msg_kb = _bc_link_kb(link_url, link_title)
-
-    # Build confirm/cancel keyboard shown under the preview
-    preview_kb = _BC_CONFIRM_KB
-
-    header = "👁 <b>Предпросмотр рассылки</b>\n\n"
-
+    header = "=== Predprosmotr rassylki ===\n\n"
     if photo_id:
-        await message.answer_photo(
-            photo=photo_id,
-            caption=header + caption,
-            reply_markup=msg_kb,
-        )
+        await message.answer_photo(photo=photo_id, caption=header + caption, reply_markup=msg_kb)
     else:
         await message.answer(header + caption, reply_markup=msg_kb)
-
-    await message.answer(
-        "ℹ️ Так будет выглядеть рассылка. Отправить?",
-        reply_markup=preview_kb,
-    )
+    await message.answer("Tak budet vyglyadet rassylka. Otpravit?", reply_markup=_BC_CONFIRM_KB)
 
 
 @router.callback_query(F.data == "bc:cancel", IsAdmin())
 async def bc_cancel_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
-    await callback.message.edit_text("❌ Рассылка отменена.")
+    await callback.message.edit_text("Rassylka otmenena.")
     await callback.answer()
 
 
@@ -616,42 +687,35 @@ async def bc_cancel_confirm(callback: CallbackQuery, state: FSMContext) -> None:
 async def bc_do_send(callback: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
     await state.clear()
-    await callback.message.edit_text("⏳ Отправляю рассылку...")
+    await callback.message.edit_text("Otpravlyayu rassylku...")
     await callback.answer()
-
     from infrastructure.database.session import async_session_factory
     from sqlalchemy import select
     from infrastructure.database.models import User
-
     photo_id   = data.get("photo_id")
     caption    = data.get("caption", "")
     link_url   = data.get("link_url", "")
-    link_title = data.get("link_title", "🔗 Перейти")
+    link_title = data.get("link_title", "Perejti")
     msg_kb     = _bc_link_kb(link_url, link_title)
-
     async with async_session_factory() as session:
         res      = await session.execute(
             select(User.telegram_id).where(User.is_banned == False)  # noqa: E712
         )
         user_ids = [row[0] for row in res.all()]
-
     sent = failed = 0
     for tg_id in user_ids:
         try:
             if photo_id:
-                await callback.bot.send_photo(
-                    tg_id, photo=photo_id, caption=caption, reply_markup=msg_kb
-                )
+                await callback.bot.send_photo(tg_id, photo=photo_id, caption=caption, reply_markup=msg_kb)
             else:
                 await callback.bot.send_message(tg_id, caption, reply_markup=msg_kb)
             sent += 1
         except Exception:
             failed += 1
-
     await callback.message.edit_text(
-        f"📣 <b>Рассылка завершена</b>\n\n"
-        f"✅ Отправлено: {sent}\n"
-        f"❌ Не доставлено: {failed}"
+        "=== Rassylka zavershena ===\n\n"
+        "Otpravleno: {sent}\n"
+        "Ne dostavleno: {failed}".format(sent=sent, failed=failed)
     )
 
 
@@ -661,9 +725,9 @@ async def bc_do_send(callback: CallbackQuery, state: FSMContext) -> None:
 async def admin_cancel(message: Message, state: FSMContext) -> None:
     if await state.get_state():
         await state.clear()
-        await message.answer("❌ Отменено.")
+        await message.answer("Otmeneno.")
     else:
-        await message.answer("Нечего отменять.")
+        await message.answer("Nechego otmenyat.")
 
 
 # ── Back ──────────────────────────────────────────────────────────────────────
