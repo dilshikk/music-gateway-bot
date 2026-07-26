@@ -30,7 +30,6 @@ class UserRepository:
         """
         user = await self.get_by_telegram_id(telegram_id)
         if user:
-            # Обновляем username/first_name если изменились
             changed = False
             if username is not None and user.username != username:
                 user.username = username
@@ -64,7 +63,9 @@ class UserRepository:
         """Увеличивает счётчик запросов пользователя."""
         user = await self.get_by_id(user_id)
         if user:
-            user.requests_total = (user.requests_total or 0) + 1
+            # BUG FIX: the column in models.py is 'total_requests', not 'requests_total'
+            user.total_requests = (user.total_requests or 0) + 1
+            user.daily_requests = (user.daily_requests or 0) + 1
             self.session.add(user)
             await self.session.commit()
 
