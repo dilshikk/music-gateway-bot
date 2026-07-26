@@ -3,6 +3,7 @@ import logging
 from collections.abc import Callable
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, Message
 
 from bot.keyboards.search import (
@@ -20,6 +21,18 @@ router = Router(name="search")
 
 # task_id → SearchResult (для пагинации и скачивания)
 _results_cache: dict[str, SearchResult] = {}
+
+
+async def _safe_edit_markup(msg, reply_markup) -> None:
+    """
+    Безопасно обновляет reply_markup — игнорирует ошибку
+    'message is not modified' при двойном нажатии.
+    """
+    try:
+        await msg.edit_reply_markup(reply_markup=reply_markup)
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            raise
 
 
 @router.message(F.text & ~F.text.startswith("/"))
@@ -84,8 +97,7 @@ async def handle_download(
     cache: CacheManager,
     _: Callable,
 ) -> None:
-    # BUG FIX: avoid shadowing the i18n `_` function with tuple-unpacking prefix
-    parts = callback.data.split(":", 2)
+    parts     = callback.data.split(":", 2)
     task_id   = parts[1]
     track_idx = int(parts[2])
 
@@ -96,22 +108,20 @@ async def handle_download(
 
     track = result.tracks[track_idx]
 
-    await callback.message.edit_reply_markup(reply_markup=build_downloading_keyboard())
+    await _safe_edit_markup(callback.message, build_downloading_keyboard())
     await callback.answer()
 
     try:
-        # BUG FIX: передаём chat_id пользователя — userbot доставит аудио
-        # напрямую через copy_message.  file_id из Pyrogram-сессии не работает
-        # при отправке через главный бот (разные сессии/токены).
+        # Userbot доставляет аудио напрямую в чат пользователя (copy_message).
+        # file_id из Pyrogram-сессии невалиден для главного бота.
         target_chat_id = callback.message.chat.id
         audio = await search_manager.get_audio(
             track, user.id, target_chat_id=target_chat_id
         )
 
         if not audio.delivered:
-            # Запасной путь: если источник не выполнил прямую доставку
-            # (например, CustomMusicSource возвращает настоящий file_id),
-            # отправляем через главный бот как обычно.
+            # Запасной путь для источников, возвращающих настоящий file_id
+            # (например, CustomMusicSource / HTTP API).
             await callback.message.answer_audio(
                 audio=audio.telegram_file_id,
                 title=audio.title,
@@ -121,7 +131,8 @@ async def handle_download(
             )
 
         keyboard = build_search_results_keyboard(result, task_id)
-        await callback.message.edit_reply_markup(reply_markup=keyboard)
+        # BUG FIX: wrap in _safe_edit_markup to swallow 'message is not modified'
+        await _safe_edit_markup(callback.message, keyboard)
 
         from infrastructure.database.repositories.user_repo import UserRepository
         from infrastructure.database.session import async_session_factory
@@ -131,7 +142,7 @@ async def handle_download(
     except Exception as e:
         logger.error("Ошибка скачивания трека: %s", e)
         keyboard = build_search_results_keyboard(result, task_id)
-        await callback.message.edit_reply_markup(reply_markup=keyboard)
+        await _safe_edit_markup(callback.message, keyboard)
         await callback.answer(_("download-error"), show_alert=True)
 
 
@@ -161,7 +172,7 @@ async def handle_pagination(
         _results_cache[task_id] = result
 
         keyboard = build_search_results_keyboard(result, task_id)
-        await callback.message.edit_reply_markup(reply_markup=keyboard)
+        await _safe_edit_markup(callback.message, keyboard)
 
     except Exception as e:
         logger.error("Ошибка пагинации: %s", e)
