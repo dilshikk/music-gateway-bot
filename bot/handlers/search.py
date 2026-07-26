@@ -3,6 +3,7 @@ import logging
 from collections.abc import Callable
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, Message
 
 from bot.keyboards.search import (
@@ -20,6 +21,17 @@ router = Router(name="search")
 
 # task_id → SearchResult (для пагинации и скачивания)
 _results_cache: dict[str, SearchResult] = {}
+
+
+async def _safe_edit_reply_markup(callback: CallbackQuery, keyboard) -> None:
+    """edit_reply_markup, игнорируя ошибку 'message is not modified'."""
+    try:
+        await callback.message.edit_reply_markup(reply_markup=keyboard)
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e).lower():
+            logger.debug("[safe_edit] клавиатура не изменилась, пропускаем")
+        else:
+            raise
 
 
 @router.message(F.text & ~F.text.startswith("/"))
@@ -95,7 +107,7 @@ async def handle_download(
 
     track = result.tracks[track_idx]
 
-    await callback.message.edit_reply_markup(reply_markup=build_downloading_keyboard())
+    await _safe_edit_reply_markup(callback, build_downloading_keyboard())
     await callback.answer()
 
     target_chat_id = callback.from_user.id
@@ -128,7 +140,7 @@ async def handle_download(
             )
 
         keyboard = build_search_results_keyboard(result, task_id)
-        await callback.message.edit_reply_markup(reply_markup=keyboard)
+        await _safe_edit_reply_markup(callback, keyboard)
 
         from infrastructure.database.repositories.user_repo import UserRepository
         from infrastructure.database.session import async_session_factory
@@ -138,7 +150,7 @@ async def handle_download(
     except Exception as e:
         logger.error("Ошибка скачивания трека: %s", e)
         keyboard = build_search_results_keyboard(result, task_id)
-        await callback.message.edit_reply_markup(reply_markup=keyboard)
+        await _safe_edit_reply_markup(callback, keyboard)
         await callback.answer(_("download-error"), show_alert=True)
 
 
@@ -167,7 +179,7 @@ async def handle_pagination(
         _results_cache[task_id] = result
 
         keyboard = build_search_results_keyboard(result, task_id)
-        await callback.message.edit_reply_markup(reply_markup=keyboard)
+        await _safe_edit_reply_markup(callback, keyboard)
 
     except Exception as e:
         logger.error("Ошибка пагинации: %s", e)

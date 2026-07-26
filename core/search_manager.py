@@ -41,7 +41,11 @@ class SearchManager:
     7. Вернуть результат
     """
 
-    MAX_RETRIES = 3
+    # Поиск через @vkmusic_bot занимает ~12-15s.
+    # При одном userbot пагинация/скачивание должны дождаться его освобождения.
+    # 10 попыток × 3s = 30s максимального ожидания — достаточно.
+    MAX_RETRIES = 10
+    RETRY_WAIT  = 3.0  # секунд между попытками взять userbot
 
     def __init__(
         self,
@@ -100,12 +104,11 @@ class SearchManager:
         for attempt in range(self.MAX_RETRIES):
             userbot = await self._pool.acquire_userbot()
             if not userbot:
-                wait = 2 ** attempt
                 logger.warning(
-                    "Нет свободных userbots, ждём %ds (попытка %d)",
-                    wait, attempt + 1,
+                    "Нет свободных userbots, ждём %.1fs (попытка %d/%d)",
+                    self.RETRY_WAIT, attempt + 1, self.MAX_RETRIES,
                 )
-                await asyncio.sleep(wait)
+                await asyncio.sleep(self.RETRY_WAIT)
                 continue
 
             try:
@@ -173,7 +176,18 @@ class SearchManager:
         last_error: Exception | None = None
 
         for source in sources:
-            userbot = await self._pool.acquire_userbot()
+            # Ждём свободный userbot с теми же retry-параметрами
+            userbot = None
+            for attempt in range(self.MAX_RETRIES):
+                userbot = await self._pool.acquire_userbot()
+                if userbot:
+                    break
+                logger.warning(
+                    "[get_audio] Нет свободных userbots, ждём %.1fs (попытка %d/%d)",
+                    self.RETRY_WAIT, attempt + 1, self.MAX_RETRIES,
+                )
+                await asyncio.sleep(self.RETRY_WAIT)
+
             if not userbot:
                 raise SourceUnavailableError("Нет свободных userbots")
 
