@@ -1,5 +1,5 @@
 # Telegram
-aiogram==3.13.0
+aiogram==3.30.0
 pyrogram==2.0.106
 TgCrypto==1.2.3
 
