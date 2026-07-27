@@ -350,7 +350,7 @@ class VKMusicBotSource(MusicSource):
         await self._client.send_message(self.bot_username, query)
         print("[_search_internal] запрос отправлен  ждём ответ с кнопками...")
 
-        msg = await self._wait_for_reply(prev_id=prev_id, has_markup=True, timeout=self.SEARCH_WAIT)
+        msg = await self._wait_for_new_message(prev_id=prev_id, has_markup=True, timeout=self.SEARCH_WAIT)
         if not msg:
             print(f"[_search_internal] таймаут: нет ответа за {self.SEARCH_WAIT}s")
             raise SourceTimeoutError(f"Нет ответа от {self.bot_username}")
@@ -441,9 +441,7 @@ class VKMusicBotSource(MusicSource):
             )
 
             # Pyrogram хранит пиры в локальном SQLite-кэше.
-            # Если userbot ни разу не взаимодействовал с группой — кэша нет → KeyError.
             # get_chat() принудительно резолвит и кэширует группу перед отправкой.
-            # ТРЕБОВАНИЕ: userbot должен быть участником группы (вступить вручную).
             try:
                 await self._client.get_chat(log_group_id)
                 print(f"[_get_audio_internal] peer {log_group_id} резолвлен успешно")
@@ -462,8 +460,6 @@ class VKMusicBotSource(MusicSource):
                     f"Отправьте любое сообщение в группу с аккаунта userbot."
                 ) from resolve_err
 
-            # Пересылаем аудио в служебную группу с пометкой target_chat_id.
-            # Бот в группе получит родной Bot API file_id и отправит пользователю.
             await self._client.send_audio(
                 chat_id=log_group_id,
                 audio=a.file_id,
@@ -512,6 +508,13 @@ class VKMusicBotSource(MusicSource):
     # ── Навигация по страницам ────────────────────────────────────────────────
 
     async def _navigate_to_page(self, msg: Message, target_page: int) -> Message:
+        """
+        Листает страницы @vkmusic_bot нажимая ➡️.
+
+        ВАЖНО: @vkmusic_bot редактирует существующее сообщение при пагинации,
+        не присылает новое. Поэтому после клика поллим get_messages(msg_id)
+        пока строка "Результаты X-Y из Z" не изменится.
+        """
         current = msg
         for step in range(target_page - 1):
             next_btn_index = _find_button_flat_index(current, "\u27a1\ufe0f")
@@ -519,17 +522,28 @@ class VKMusicBotSource(MusicSource):
                 print(f"[navigate] кнопка ➡️ не найдена на шаге {step + 1}")
                 break
 
-            prev_id = await self._get_last_message_id()
-            await current.click(next_btn_index)
-            print(f"[navigate] шаг {step + 1}/{target_page - 1}  click({next_btn_index})")
+            # Запоминаем текущий текст «Результаты X-Y из Z» как маркер изменения
+            old_text = current.text or ""
+            old_results_line = _extract_results_line(old_text)
+            print(
+                f"[navigate] шаг {step + 1}/{target_page - 1}  "
+                f"click({next_btn_index})  old_results={old_results_line!r}"
+            )
 
-            updated = await self._wait_for_reply(
-                prev_id=prev_id, has_markup=True, timeout=self.SEARCH_WAIT
+            await current.click(next_btn_index)
+
+            # Ждём пока сообщение обновится (бот редактирует, не присылает новое)
+            updated = await self._wait_for_message_edit(
+                msg_id=current.id,
+                old_results_line=old_results_line,
+                timeout=self.SEARCH_WAIT,
             )
             if updated:
                 current = updated
+                print(f"[navigate] страница обновилась  msg_id={current.id}  "
+                      f"new_results={_extract_results_line(current.text or '')!r}")
             else:
-                print(f"[navigate] таймаут на шаге {step + 1}")
+                print(f"[navigate] таймаут на шаге {step + 1} — остаёмся на текущей странице")
                 break
 
         print(f"[navigate] итог  msg_id={current.id}")
@@ -542,12 +556,13 @@ class VKMusicBotSource(MusicSource):
             return m.id
         return 0
 
-    async def _wait_for_reply(
+    async def _wait_for_new_message(
         self,
         prev_id: int,
         has_markup: bool = False,
         timeout: float = 12.0,
     ) -> Message | None:
+        """Ждёт новое сообщение с id > prev_id. Используется при первом поиске."""
         deadline = time.monotonic() + timeout
         last_seen_id = prev_id
         poll = 0
@@ -561,10 +576,41 @@ class VKMusicBotSource(MusicSource):
                 if has_markup and not m.reply_markup:
                     last_seen_id = m.id
                     continue
-                print(f"[wait_reply] нашли msg_id={m.id}  poll#{poll}")
+                print(f"[wait_new_msg] нашли msg_id={m.id}  poll#{poll}")
                 return m
 
-        print(f"[wait_reply] таймаут {timeout}s  poll={poll}")
+        print(f"[wait_new_msg] таймаут {timeout}s  poll={poll}")
+        return None
+
+    async def _wait_for_message_edit(
+        self,
+        msg_id: int,
+        old_results_line: str,
+        timeout: float = 12.0,
+    ) -> Message | None:
+        """
+        Ждёт пока @vkmusic_bot отредактирует сообщение msg_id.
+        Сравниваем строку «Результаты X-Y из Z» — она меняется при каждом листании.
+        """
+        deadline = time.monotonic() + timeout
+        poll = 0
+
+        while time.monotonic() < deadline:
+            await asyncio.sleep(self.POLL_INTERVAL)
+            poll += 1
+            # get_messages возвращает актуальную версию сообщения из Telegram
+            msgs = await self._client.get_messages(self.bot_username, message_ids=msg_id)
+            # get_messages может вернуть один объект или список
+            m: Message | None = msgs if isinstance(msgs, Message) else (msgs[0] if msgs else None)
+            if not m:
+                continue
+            new_results_line = _extract_results_line(m.text or "")
+            if new_results_line and new_results_line != old_results_line:
+                print(f"[wait_edit] изменение обнаружено  poll#{poll}  "
+                      f"{old_results_line!r} → {new_results_line!r}")
+                return m
+
+        print(f"[wait_edit] таймаут {timeout}s  poll={poll}  msg_id={msg_id}")
         return None
 
     async def _wait_for_audio(self, prev_id: int, timeout: float = 20.0) -> Message | None:
@@ -604,6 +650,12 @@ def _find_button_flat_index(msg: Message, text: str) -> int:
                 return idx
             idx += 1
     return -1
+
+
+def _extract_results_line(text: str) -> str:
+    """Извлекает строку 'Результаты X-Y из Z' для сравнения при пагинации."""
+    m = re.search(r"Результаты\s+\d+-\d+\s+из\s+\d+", text)
+    return m.group(0) if m else ""
 
 
 def _make_query_hash(query: str) -> str:
