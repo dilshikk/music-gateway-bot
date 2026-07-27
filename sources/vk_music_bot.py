@@ -48,6 +48,9 @@ logger = logging.getLogger(__name__)
 
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB — лимит Telegram Bot API
 
+# Разделитель артист/название: обычный дефис, en-dash (–) или em-dash (—)
+_ARTIST_TITLE_SEP = re.compile(r"\s+[-\u2013\u2014]\s+")
+
 
 # ─── Внутренние типы очереди ──────────────────────────────────────────────────
 
@@ -79,10 +82,13 @@ def _parse_search_message(msg: Message) -> _ParsedResult:
     1. Artist - Title  48:32  44.4M  128k
     ...
 
-    Каждый Track сохраняет search_chat_id, search_msg_id и parsed_at —
-    точный адрес сообщения-источника. _get_audio_internal использует эти
-    данные для request_callback_answer() вместо поиска «последнего сообщения».
-    Треки без callback_data отбрасываются — они всё равно не скачаются.
+    Каждый Track сохраняет search_chat_id, search_msg_id и parsed_at
+    (UTC Unix float) — точный адрес сообщения-источника.
+    _get_audio_internal использует эти данные для request_callback_answer().
+    Треки без callback_data отбрасываются — они не скачаются.
+
+    parsed_at хранится как time.time() (не monotonic), чтобы пережить
+    JSON-сериализацию при кэшировании в Redis.
     """
     text = msg.text or ""
     tracks: list[Track] = []
@@ -124,11 +130,12 @@ def _parse_search_message(msg: Message) -> _ParsedResult:
         re.MULTILINE,
     )
 
-    # Общий для всех треков этой страницы адрес сообщения + момент парсинга
+    # Общий для всех треков этой страницы адрес сообщения + UTC-время парсинга.
+    # parsed_at = time.time() (не monotonic!) — выживает после JSON round-trip в Redis.
     msg_ref = {
         "search_chat_id": msg.chat.id,
         "search_msg_id": msg.id,
-        "parsed_at": time.monotonic(),
+        "parsed_at": time.time(),
     }
 
     for m in line_pattern.finditer(text):
@@ -139,8 +146,11 @@ def _parse_search_message(msg: Message) -> _ParsedResult:
         bitrate   = int(m.group(5))
         lossless  = bool(m.group(6))
 
-        if " - " in raw_title:
-            artist, title = raw_title.split(" - ", 1)
+        # Разделяем артиста и название по дефису, en-dash или em-dash
+        sep_match = _ARTIST_TITLE_SEP.search(raw_title)
+        if sep_match:
+            artist = raw_title[:sep_match.start()].strip()
+            title  = raw_title[sep_match.end():].strip()
         else:
             artist, title = "", raw_title
 
@@ -150,20 +160,23 @@ def _parse_search_message(msg: Message) -> _ParsedResult:
             logger.warning("[parse] нет callback_data для трека #%d %r — пропускаем", num, raw_title)
             continue
 
+        track_raw = {
+            "button_num": num,
+            "callback_data": cbd,
+            **msg_ref,  # search_chat_id, search_msg_id, parsed_at
+        }
         tracks.append(Track(
-            title=title.strip(),
-            artist=artist.strip(),
+            title=title,
+            artist=artist,
             duration=duration,
             size=int(size_mb * 1024 * 1024),
             bitrate=bitrate,
             is_lossless=lossless,
             source_track_id=cbd,
-            raw={
-                "button_num": num,
-                "callback_data": cbd,
-                **msg_ref,  # search_chat_id, search_msg_id, parsed_at
-            },
+            raw=track_raw,
         ))
+        # DEBUG: убедиться, что все нужные ключи присутствуют в raw
+        print(f"[parse] DEBUG track={title!r} artist={artist!r} raw_keys={list(track_raw.keys())}")
 
     logger.debug("[parse] итог: %d треков  msg_id=%d", len(tracks), msg.id)
     return _ParsedResult(tracks=tracks, total=total, page=page, has_next=has_next)
@@ -394,6 +407,9 @@ class VKMusicBotSource(MusicSource):
         track: Track,
         target_chat_id: int | None = None,
     ) -> AudioFile:
+        # DEBUG: показать полное содержимое track.raw при входе
+        print(f"[_get_audio_internal] DEBUG track.raw={track.raw!r}")
+
         if not track.source_track_id:
             print(f"[_get_audio_internal] source_track_id пустой для {track.title!r}")
             raise TrackNotFoundError(f"Трек не имеет source_track_id: {track.title}")
@@ -406,8 +422,8 @@ class VKMusicBotSource(MusicSource):
             print(f"[_get_audio_internal] нет адреса сообщения для {track.title!r}")
             raise TrackNotFoundError(f"Нет ссылки на сообщение результатов: {track.title}")
 
-        # Ранняя проверка TTL — не тратим запрос к Telegram, если данные точно устарели
-        age = time.monotonic() - parsed_at
+        # Ранняя проверка TTL по UTC-времени (time.time(), не monotonic)
+        age = time.time() - parsed_at
         if age > self.STALE_TTL:
             print(f"[_get_audio_internal] результаты устарели  age={age:.0f}s > ttl={self.STALE_TTL}s")
             raise TrackNotFoundError("Результаты поиска устарели — повторите поиск")
