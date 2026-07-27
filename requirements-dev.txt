@@ -1,12 +1,12 @@
 # Тесты
-pytest==8.3.4
-pytest-asyncio==0.24.0
-pytest-mock==3.14.0
-pytest-cov==6.0.0
-pytest-timeout==2.3.1
+pytest==9.1.1
+pytest-asyncio==1.4.0
+pytest-mock==3.15.1
+pytest-cov==7.1.0
+pytest-timeout==2.4.0
 
 # Фикстуры БД / Redis
-fakeredis==2.26.1
+fakeredis==2.37.0
 aiosqlite==0.20.0
 
 # Фабрики данных
@@ -16,5 +16,5 @@ factory-boy==3.3.1
 respx==0.21.1
 
 # Линтер
-ruff==0.8.0
-mypy==1.13.0
+ruff==0.16.0
+mypy==2.3.0
