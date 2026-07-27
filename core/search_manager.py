@@ -13,11 +13,11 @@ from sources.base import (
     SourceTimeoutError,
     SourceUnavailableError,
     Track,
+    TrackNotFoundError,
 )
 from sources.registry import SourceRegistry
 
 logger = logging.getLogger(__name__)
-
 
 @dataclass
 class SearchContext:
@@ -25,7 +25,6 @@ class SearchContext:
     user_id: int
     page: int = 1
     preferred_source: str | None = None
-
 
 class SearchManager:
     """
@@ -41,11 +40,7 @@ class SearchManager:
     7. Вернуть результат
     """
 
-    # Поиск через @vkmusic_bot занимает ~12-15s.
-    # При одном userbot пагинация/скачивание должны дождаться его освобождения.
-    # 10 попыток × 3s = 30s максимального ожидания — достаточно.
-    MAX_RETRIES = 10
-    RETRY_WAIT  = 3.0  # секунд между попытками взять userbot
+    MAX_RETRIES = 3
 
     def __init__(
         self,
@@ -53,11 +48,11 @@ class SearchManager:
         registry: SourceRegistry,
         cache: CacheManager,
     ) -> None:
-        self._pool     = pool
+        self._pool = pool
         self._registry = registry
-        self._cache    = cache
+        self._cache = cache
 
-    # ── Поиск треков ──────────────────────────────────────────────────────
+    # ── Поиск треков ──────────────────────────────────────────────────────────
 
     async def search(self, ctx: SearchContext) -> SearchResult:
         # 1. Кэш
@@ -67,7 +62,7 @@ class SearchManager:
             await self._cache.increment_popular(ctx.query)
             return cached
 
-        # 2. Получить источники
+        # 2. Получить источники (с учётом preferred_source)
         sources = self._get_sources(ctx.preferred_source)
         if not sources:
             raise SourceUnavailableError("Нет доступных источников")
@@ -104,11 +99,12 @@ class SearchManager:
         for attempt in range(self.MAX_RETRIES):
             userbot = await self._pool.acquire_userbot()
             if not userbot:
+                wait = 2 ** attempt
                 logger.warning(
-                    "Нет свободных userbots, ждём %.1fs (попытка %d/%d)",
-                    self.RETRY_WAIT, attempt + 1, self.MAX_RETRIES,
+                    "Нет свободных userbots, ждём %ds (попытка %d)",
+                    wait, attempt + 1,
                 )
-                await asyncio.sleep(self.RETRY_WAIT)
+                await asyncio.sleep(wait)
                 continue
 
             try:
@@ -116,6 +112,7 @@ class SearchManager:
 
             except SourceFloodWaitError as e:
                 await self._pool.handle_flood_wait(userbot, e.seconds)
+                # Не освобождаем — userbot сам восстановится
                 continue
 
             except Exception:
@@ -132,6 +129,7 @@ class SearchManager:
     ) -> SearchResult:
         start = time.monotonic()
         try:
+            # Передаём клиент userbot в источник (duck typing)
             if hasattr(source, "_client"):
                 source._client = userbot.client  # type: ignore[attr-defined]
 
@@ -150,7 +148,7 @@ class SearchManager:
         finally:
             await self._pool.release_userbot(userbot)
 
-    # ── Получение аудио ──────────────────────────────────────────────────────
+    # ── Получение аудио ───────────────────────────────────────────────────────
 
     async def get_audio(
         self,
@@ -158,14 +156,9 @@ class SearchManager:
         user_id: int,
         target_chat_id: int | None = None,
     ) -> AudioFile:
-        """
-        Получить аудиофайл.
-
-        target_chat_id — Telegram chat_id пользователя. Если указан,
-        userbot перешлёт аудио напрямую в чат пользователя
-        и возвращает AudioFile с already_sent=True.
-        """
         # Проверяем кэш file_id
+        # Важно: кэшированный AudioFile не содержит already_sent=True,
+        # поэтому search.py сам отправит аудио напрямую — это корректно.
         if track.source_track_id:
             cached = await self._cache.get_audio(track.source_track_id)
             if cached:
@@ -176,18 +169,7 @@ class SearchManager:
         last_error: Exception | None = None
 
         for source in sources:
-            # Ждём свободный userbot с теми же retry-параметрами
-            userbot = None
-            for attempt in range(self.MAX_RETRIES):
-                userbot = await self._pool.acquire_userbot()
-                if userbot:
-                    break
-                logger.warning(
-                    "[get_audio] Нет свободных userbots, ждём %.1fs (попытка %d/%d)",
-                    self.RETRY_WAIT, attempt + 1, self.MAX_RETRIES,
-                )
-                await asyncio.sleep(self.RETRY_WAIT)
-
+            userbot = await self._pool.acquire_userbot()
             if not userbot:
                 raise SourceUnavailableError("Нет свободных userbots")
 
@@ -195,15 +177,25 @@ class SearchManager:
                 if hasattr(source, "_client"):
                     source._client = userbot.client  # type: ignore[attr-defined]
 
-                audio = await source.get_audio(
-                    track,
-                    target_chat_id=target_chat_id,
-                )
+                # Передаём target_chat_id в источник (используется VKMusicBotSource
+                # для пересылки аудио в LOG_GROUP_ID с caption="user:{target_chat_id}")
+                if hasattr(source, "get_audio"):
+                    audio = await source.get_audio(track, target_chat_id=target_chat_id)
+                else:
+                    audio = await source.get_audio(track)
+
                 await self._pool.release_userbot(userbot)
 
-                # Кэшируем file_id
+                # Кэшируем file_id только для fallback-пути (already_sent=False)
+                # Для already_sent=True relay.py уже доставил файл — кэш всё равно полезен
                 await self._cache.set_audio(audio)
                 return audio
+
+            except TrackNotFoundError:
+                # Трек устарел или недоступен — пробрасываем напрямую,
+                # чтобы search.py показал понятный "stale" алерт
+                await self._pool.release_userbot(userbot)
+                raise
 
             except SourceFloodWaitError as e:
                 await self._pool.handle_flood_wait(userbot, e.seconds)
@@ -219,12 +211,13 @@ class SearchManager:
             f"Не удалось получить аудио: {last_error}"
         )
 
-    # ── Вспомогательное ───────────────────────────────────────────────
+    # ── Вспомогательное ───────────────────────────────────────────────────────
 
     def _get_sources(self, preferred: str | None = None) -> list[MusicSource]:
         available = self._registry.get_available()
         if not preferred:
             return available
+        # Предпочитаемый источник первым
         preferred_src = [s for s in available if s.name == preferred]
-        rest          = [s for s in available if s.name != preferred]
+        rest = [s for s in available if s.name != preferred]
         return preferred_src + rest
