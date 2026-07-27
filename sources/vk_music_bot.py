@@ -78,6 +78,10 @@ def _parse_search_message(msg: Message) -> _ParsedResult:
 
     1. Artist - Title  48:32  44.4M  128k
     ...
+
+    Каждый Track сохраняет search_msg_id и search_chat_id — идентификатор
+    конкретного сообщения-источника, чтобы _get_audio_internal мог кликнуть
+    точно по нужной кнопке независимо от последующих поисков других юзеров.
     """
     text = msg.text or ""
     tracks: list[Track] = []
@@ -146,7 +150,15 @@ def _parse_search_message(msg: Message) -> _ParsedResult:
             bitrate=bitrate,
             is_lossless=lossless,
             source_track_id=cbd,
-            raw={"button_num": num, "callback_data": cbd, "button_index": btn_idx},
+            raw={
+                "button_num": num,
+                "callback_data": cbd,
+                "button_index": btn_idx,
+                # Сохраняем точный id сообщения-источника, чтобы при скачивании
+                # кликать именно по нему, а не по "последнему" в чате.
+                "search_msg_id": msg.id,
+                "search_chat_id": msg.chat.id,
+            },
         ))
 
     logger.debug("[parse] итог: %d треков", len(tracks))
@@ -393,10 +405,32 @@ class VKMusicBotSource(MusicSource):
                 print(f"[_get_audio_internal] нет button_index для {track.title!r}")
                 raise TrackNotFoundError(f"Нет button_index для трека: {track.title}")
 
-        search_msg = await self._get_last_search_message()
-        if not search_msg:
-            print("[_get_audio_internal] не найдено сообщение с кнопками")
-            raise TrackNotFoundError("Не найдено сообщение с результатами поиска")
+        # Адресуемся по конкретному message_id, сохранённому при парсинге.
+        # Это исключает смешивание сессий: клик всегда идёт по сообщению
+        # именно того поиска, из которого был получен этот Track.
+        search_msg_id: int | None = track.raw.get("search_msg_id")
+        search_chat_id = track.raw.get("search_chat_id") or self.bot_username
+
+        if not search_msg_id:
+            print(f"[_get_audio_internal] нет search_msg_id для {track.title!r}")
+            raise TrackNotFoundError(f"Нет search_msg_id для трека: {track.title}")
+
+        print(f"[_get_audio_internal] fetching search_msg_id={search_msg_id}  chat={search_chat_id}")
+        logger.debug("[_get_audio_internal] get_messages  chat=%s  msg_id=%d",
+                     search_chat_id, search_msg_id)
+
+        try:
+            msgs = await self._client.get_messages(search_chat_id, message_ids=search_msg_id)
+            search_msg: Message | None = msgs if isinstance(msgs, Message) else (msgs[0] if msgs else None)
+        except Exception as e:
+            print(f"[_get_audio_internal] не удалось получить сообщение {search_msg_id}: {e}")
+            raise TrackNotFoundError(f"Сообщение с результатами поиска не найдено: {e}") from e
+
+        if not search_msg or not search_msg.reply_markup:
+            print(f"[_get_audio_internal] сообщение {search_msg_id} не содержит кнопок (устарело?)")
+            raise TrackNotFoundError(
+                "Результаты поиска устарели или удалены — повторите поиск"
+            )
 
         print(f"[_get_audio_internal] search_msg_id={search_msg.id}  btn_index={btn_index}")
         logger.debug("[_get_audio_internal] search_msg_id=%d  btn_index=%d",
@@ -629,12 +663,6 @@ class VKMusicBotSource(MusicSource):
                     return m
 
         print(f"[wait_audio] таймаут {timeout}s  poll={poll}")
-        return None
-
-    async def _get_last_search_message(self) -> Message | None:
-        async for m in self._client.get_chat_history(self.bot_username, limit=5):
-            if m.reply_markup:
-                return m
         return None
 
 
