@@ -11,6 +11,7 @@ from aiogram.exceptions import TelegramBadRequest
 from bot.keyboards.search import (
     build_downloading_keyboard,
     build_search_results_keyboard,
+    build_track_list_text,
 )
 from core.cache_manager import CacheManager
 from core.queue_manager import QueueManager
@@ -35,6 +36,12 @@ def _get_user_session(user_id: int) -> dict:
             "waiting_for_track": False,
         }
     return _user_sessions[user_id]
+
+
+def _build_results_message(result: SearchResult, query: str, _: Callable) -> str:
+    """Текст сообщения: заголовок + нумерованный список треков."""
+    header = f"🔍 {query}\nРезультаты {(result.page - 1) * 8 + 1}–{(result.page - 1) * 8 + len(result.tracks)} из {result.total}\n\n"
+    return header + build_track_list_text(result)
 
 
 @router.message(F.text & ~F.text.startswith("/"), StateFilter(default_state))
@@ -101,9 +108,9 @@ async def handle_search_query(
     print(f"[search] active sessions: {list(_user_sessions.keys())}")
 
     keyboard = build_search_results_keyboard(result, task.task_id)
-    header = _("search-results-header", query=query, total=result.total)
-    print(f"[search] sending results header: {header!r}")
-    await wait_msg.edit_text(header, reply_markup=keyboard)
+    text = _build_results_message(result, query, _)
+    print(f"[search] sending results")
+    await wait_msg.edit_text(text, reply_markup=keyboard)
 
 
 @router.callback_query(F.data.startswith("dl:"))
@@ -139,9 +146,6 @@ async def handle_download(
     await callback.answer()
 
     try:
-        # ВАЖНО: передаём telegram_chat_id (не user.id из БД!)
-        # Именно этот ID попадёт в caption="user:{telegram_chat_id}" в группе,
-        # и relay.py отправит аудио в правильный чат.
         print(f"[search] calling get_audio: track={track.title!r} target_chat_id={telegram_chat_id}")
         audio = await search_manager.get_audio(
             track,
@@ -151,13 +155,9 @@ async def handle_download(
         print(f"[search] got audio: file_id={audio.telegram_file_id!r} already_sent={audio.already_sent}")
 
         if audio.already_sent:
-            # relay.py уже отправил аудио пользователю через группу — ничего не делаем
             print("[search] already_sent=True — relay.py перешлёт пользователю, пропускаем send_audio")
         else:
-            # Fallback: LOG_GROUP_ID не настроен — отправляем напрямую
-            # ВНИМАНИЕ: file_id от Pyrogram не работает в Bot API.
-            # Этот путь работает только если file_id получен через Bot API (кэш и т.п.)
-            print("[search] already_sent=False — отправляем напрямую (fallback, LOG_GROUP_ID не настроен)")
+            print("[search] already_sent=False — отправляем напрямую (fallback)")
             await callback.message.answer_audio(
                 audio=audio.telegram_file_id,
                 title=audio.title,
@@ -228,17 +228,16 @@ async def handle_pagination(
         print(f"[search] updated session for user_id={user.id}")
 
         keyboard = build_search_results_keyboard(result, task_id)
+        text = _build_results_message(result, old_result.query, _)
         try:
-            await callback.message.edit_reply_markup(reply_markup=keyboard)
+            await callback.message.edit_text(text, reply_markup=keyboard)
         except TelegramBadRequest as e:
             if "message is not modified" in str(e):
-                # Страница 2 вернула те же треки — просто игнорируем
-                print("[search] pagination keyboard not modified — same content, ignoring")
+                print("[search] pagination content not modified — ignoring")
             else:
                 raise
 
     except TelegramBadRequest:
-        # Уже обработано выше
         pass
     except Exception as e:
         print(f"[search] Exception in handle_pagination: {e}")
