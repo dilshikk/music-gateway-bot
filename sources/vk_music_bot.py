@@ -79,9 +79,10 @@ def _parse_search_message(msg: Message) -> _ParsedResult:
     1. Artist - Title  48:32  44.4M  128k
     ...
 
-    Каждый Track сохраняет search_msg_id и search_chat_id — идентификатор
-    конкретного сообщения-источника, чтобы _get_audio_internal мог кликнуть
-    точно по нужной кнопке независимо от последующих поисков других юзеров.
+    Каждый Track сохраняет search_chat_id, search_msg_id и parsed_at —
+    точный адрес сообщения-источника. _get_audio_internal использует эти
+    данные для request_callback_answer() вместо поиска «последнего сообщения».
+    Треки без callback_data отбрасываются — они всё равно не скачаются.
     """
     text = msg.text or ""
     tracks: list[Track] = []
@@ -104,17 +105,14 @@ def _parse_search_message(msg: Message) -> _ParsedResult:
     else:
         logger.warning("[parse] строка 'Результаты ...' не найдена")
 
+    # Собираем только callback_data — button_index больше не нужен,
+    # клик идёт напрямую по callback_data через request_callback_answer().
     button_map: dict[int, str] = {}
-    button_index_map: dict[int, int] = {}
-    flat_index = 0
     if msg.reply_markup:
         for row in msg.reply_markup.inline_keyboard:
             for btn in row:
                 if btn.text.isdigit() and btn.callback_data:
-                    track_num = int(btn.text)
-                    button_map[track_num] = btn.callback_data
-                    button_index_map[track_num] = flat_index
-                flat_index += 1
+                    button_map[int(btn.text)] = btn.callback_data
     logger.debug("[parse] кнопок с треками: %d", len(button_map))
 
     line_pattern = re.compile(
@@ -125,6 +123,13 @@ def _parse_search_message(msg: Message) -> _ParsedResult:
         r"(\s+Lossless)?",
         re.MULTILINE,
     )
+
+    # Общий для всех треков этой страницы адрес сообщения + момент парсинга
+    msg_ref = {
+        "search_chat_id": msg.chat.id,
+        "search_msg_id": msg.id,
+        "parsed_at": time.monotonic(),
+    }
 
     for m in line_pattern.finditer(text):
         num       = int(m.group(1))
@@ -139,8 +144,11 @@ def _parse_search_message(msg: Message) -> _ParsedResult:
         else:
             artist, title = "", raw_title
 
-        cbd     = button_map.get(num, "")
-        btn_idx = button_index_map.get(num, -1)
+        cbd = button_map.get(num, "")
+        if not cbd:
+            # Трек без кнопки скачать невозможно — не отдаём пользователю
+            logger.warning("[parse] нет callback_data для трека #%d %r — пропускаем", num, raw_title)
+            continue
 
         tracks.append(Track(
             title=title.strip(),
@@ -153,15 +161,11 @@ def _parse_search_message(msg: Message) -> _ParsedResult:
             raw={
                 "button_num": num,
                 "callback_data": cbd,
-                "button_index": btn_idx,
-                # Сохраняем точный id сообщения-источника, чтобы при скачивании
-                # кликать именно по нему, а не по "последнему" в чате.
-                "search_msg_id": msg.id,
-                "search_chat_id": msg.chat.id,
+                **msg_ref,  # search_chat_id, search_msg_id, parsed_at
             },
         ))
 
-    logger.debug("[parse] итог: %d треков", len(tracks))
+    logger.debug("[parse] итог: %d треков  msg_id=%d", len(tracks), msg.id)
     return _ParsedResult(tracks=tracks, total=total, page=page, has_next=has_next)
 
 
@@ -185,7 +189,7 @@ class VKMusicBotSource(MusicSource):
     ответов @vkmusic_bot между разными пользователями.
 
     Поток скачивания:
-      1. Нажать кнопку трека в чате @vkmusic_bot
+      1. request_callback_answer() по точному (chat_id, msg_id, callback_data)
       2. Дождаться аудио-сообщения
       3. Переслать в служебную группу LOG_GROUP_ID с caption="user:{chat_id}"
       4. relay.py: видит аудио в группе → читает caption → send_audio пользователю
@@ -198,6 +202,7 @@ class VKMusicBotSource(MusicSource):
     SEARCH_WAIT   = 12.0
     AUDIO_WAIT    = 20.0
     POLL_INTERVAL = 0.5
+    STALE_TTL     = 15 * 60  # секунды; синхронизировано с SESSION_TTL в search.py
 
     def __init__(
         self,
@@ -393,52 +398,60 @@ class VKMusicBotSource(MusicSource):
             print(f"[_get_audio_internal] source_track_id пустой для {track.title!r}")
             raise TrackNotFoundError(f"Трек не имеет source_track_id: {track.title}")
 
-        btn_index: int = track.raw.get("button_index", -1)
-        if btn_index < 0:
-            fallback = track.raw.get("button_num")
-            if isinstance(fallback, int) and fallback > 0:
-                btn_index = fallback - 1
-                print(f"[_get_audio_internal] fallback btn_index={btn_index} для {track.title!r}")
-                logger.warning("[_get_audio_internal] fallback btn_index=%d для %r",
-                               btn_index, track.title)
-            else:
-                print(f"[_get_audio_internal] нет button_index для {track.title!r}")
-                raise TrackNotFoundError(f"Нет button_index для трека: {track.title}")
+        search_chat_id = track.raw.get("search_chat_id")
+        search_msg_id  = track.raw.get("search_msg_id")
+        parsed_at      = track.raw.get("parsed_at", 0.0)
 
-        # Адресуемся по конкретному message_id, сохранённому при парсинге.
-        # Это исключает смешивание сессий: клик всегда идёт по сообщению
-        # именно того поиска, из которого был получен этот Track.
-        search_msg_id: int | None = track.raw.get("search_msg_id")
-        search_chat_id = track.raw.get("search_chat_id") or self.bot_username
+        if not search_chat_id or not search_msg_id:
+            print(f"[_get_audio_internal] нет адреса сообщения для {track.title!r}")
+            raise TrackNotFoundError(f"Нет ссылки на сообщение результатов: {track.title}")
 
-        if not search_msg_id:
-            print(f"[_get_audio_internal] нет search_msg_id для {track.title!r}")
-            raise TrackNotFoundError(f"Нет search_msg_id для трека: {track.title}")
+        # Ранняя проверка TTL — не тратим запрос к Telegram, если данные точно устарели
+        age = time.monotonic() - parsed_at
+        if age > self.STALE_TTL:
+            print(f"[_get_audio_internal] результаты устарели  age={age:.0f}s > ttl={self.STALE_TTL}s")
+            raise TrackNotFoundError("Результаты поиска устарели — повторите поиск")
 
-        print(f"[_get_audio_internal] fetching search_msg_id={search_msg_id}  chat={search_chat_id}")
+        print(
+            f"[_get_audio_internal] fetching  chat={search_chat_id}  msg_id={search_msg_id}  "
+            f"age={age:.0f}s  cbd={track.source_track_id!r}"
+        )
         logger.debug("[_get_audio_internal] get_messages  chat=%s  msg_id=%d",
                      search_chat_id, search_msg_id)
 
+        # Проверяем, что сообщение и нужная кнопка ещё существуют
         try:
             msgs = await self._client.get_messages(search_chat_id, message_ids=search_msg_id)
             search_msg: Message | None = msgs if isinstance(msgs, Message) else (msgs[0] if msgs else None)
         except Exception as e:
-            print(f"[_get_audio_internal] не удалось получить сообщение {search_msg_id}: {e}")
-            raise TrackNotFoundError(f"Сообщение с результатами поиска не найдено: {e}") from e
+            print(f"[_get_audio_internal] сообщение {search_msg_id} недоступно: {e}")
+            raise TrackNotFoundError("Сообщение с результатами поиска не найдено") from e
 
         if not search_msg or not search_msg.reply_markup:
-            print(f"[_get_audio_internal] сообщение {search_msg_id} не содержит кнопок (устарело?)")
-            raise TrackNotFoundError(
-                "Результаты поиска устарели или удалены — повторите поиск"
-            )
+            print(f"[_get_audio_internal] сообщение {search_msg_id} без клавиатуры")
+            raise TrackNotFoundError("Результаты поиска устарели или были изменены — повторите поиск")
 
-        print(f"[_get_audio_internal] search_msg_id={search_msg.id}  btn_index={btn_index}")
-        logger.debug("[_get_audio_internal] search_msg_id=%d  btn_index=%d",
-                     search_msg.id, btn_index)
+        if not _callback_exists(search_msg, track.source_track_id):
+            print(f"[_get_audio_internal] callback_data {track.source_track_id!r} не найден в msg {search_msg_id}")
+            raise TrackNotFoundError("Кнопка трека больше не найдена — результаты обновились")
+
+        print(
+            f"[_get_audio_internal] клик  chat={search_chat_id}  msg={search_msg_id}  "
+            f"cbd={track.source_track_id!r}  track={track.title!r}"
+        )
 
         prev_id = await self._get_last_message_id()
-        await search_msg.click(btn_index)
-        print(f"[_get_audio_internal] click({btn_index}) отправлен  prev_id={prev_id}  ждём аудио...")
+        try:
+            await self._client.request_callback_answer(
+                chat_id=search_chat_id,
+                message_id=search_msg_id,
+                callback_data=track.source_track_id,
+            )
+        except Exception as e:
+            print(f"[_get_audio_internal] ошибка request_callback_answer: {e}")
+            raise TrackNotFoundError(f"Не удалось нажать кнопку трека: {e}") from e
+
+        print(f"[_get_audio_internal] callback отправлен  prev_id={prev_id}  ждём аудио...")
 
         audio_msg = await self._wait_for_audio(prev_id=prev_id, timeout=self.AUDIO_WAIT)
         if not audio_msg or not audio_msg.audio:
@@ -548,6 +561,9 @@ class VKMusicBotSource(MusicSource):
         ВАЖНО: @vkmusic_bot редактирует существующее сообщение при пагинации,
         не присылает новое. Поэтому после клика поллим get_messages(msg_id)
         пока строка "Результаты X-Y из Z" не изменится.
+
+        _find_button_flat_index для кнопки ➡️ безопасен: клик происходит
+        немедленно внутри воркера, без разрыва во времени.
         """
         current = msg
         for step in range(target_page - 1):
@@ -632,9 +648,7 @@ class VKMusicBotSource(MusicSource):
         while time.monotonic() < deadline:
             await asyncio.sleep(self.POLL_INTERVAL)
             poll += 1
-            # get_messages возвращает актуальную версию сообщения из Telegram
             msgs = await self._client.get_messages(self.bot_username, message_ids=msg_id)
-            # get_messages может вернуть один объект или список
             m: Message | None = msgs if isinstance(msgs, Message) else (msgs[0] if msgs else None)
             if not m:
                 continue
@@ -669,6 +683,7 @@ class VKMusicBotSource(MusicSource):
 # ─── Вспомогательные функции ──────────────────────────────────────────────────
 
 def _find_button_flat_index(msg: Message, text: str) -> int:
+    """Находит плоский индекс кнопки по тексту. Используется только для ➡️ в пагинации."""
     if not msg.reply_markup:
         return -1
     idx = 0
@@ -678,6 +693,17 @@ def _find_button_flat_index(msg: Message, text: str) -> int:
                 return idx
             idx += 1
     return -1
+
+
+def _callback_exists(msg: Message, callback_data: str) -> bool:
+    """Проверяет, есть ли кнопка с данным callback_data в клавиатуре сообщения."""
+    if not msg.reply_markup:
+        return False
+    for row in msg.reply_markup.inline_keyboard:
+        for btn in row:
+            if btn.callback_data == callback_data:
+                return True
+    return False
 
 
 def _extract_results_line(text: str) -> str:
