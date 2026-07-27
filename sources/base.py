@@ -2,37 +2,34 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-
-# ─── Data Transfer Objects ─────────────────────────────────────────────────
+# ─── Data Transfer Objects ────────────────────────────────────────────────────
 
 @dataclass
 class Track:
     """Единый формат трека для всех источников."""
     title: str
-    duration: int           # секунды
-    size: int               # байты
-    source_track_id: str    # внутренний ID в источнике (callback_data и т.п.)
+    duration: int          # секунды
+    size: int              # байты
+    source_track_id: str   # внутренний ID в источнике (callback_data и т.п.)
     artist: str = ""
-    bitrate: int = 0        # kbps
+    bitrate: int = 0       # kbps
     is_lossless: bool = False
     thumbnail_url: str = ""
     raw: dict = field(default_factory=dict)  # оригинальный ответ источника
-
+    # raw намеренно оставлен как dict без схемы — ключи search_chat_id,
+    # search_msg_id, parsed_at должны проходить сквозь asdict/Track(**t) без обрезки.
 
 @dataclass
 class AudioFile:
-    """Полученный аудиофайл готовый к отправке."""
+    """Полученный аудиофайл, готовый к отправке."""
     telegram_file_id: str
     telegram_unique_id: str
     title: str
     artist: str
     duration: int
     size: int
-    file_path: str | None = None  # если скачан локально
-    # Если True — userbot уже отправил файл пользователю напрямую,
-    # aiogram-бот не должен повторно отправлять аудио
-    already_sent: bool = False
-
+    file_path: str | None = None   # если скачан локально
+    already_sent: bool = False     # True когда userbot переслал в LOG_GROUP_ID напрямую
 
 @dataclass
 class SearchResult:
@@ -43,26 +40,22 @@ class SearchResult:
     has_next: bool = False
     source_name: str = ""
     query: str = ""
+    # BUG FIX: datetime.utcnow() deprecated since Python 3.12 — use timezone-aware datetime
     fetched_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
-
-# ─── Exceptions ───────────────────────────────────────────────────────────────────
+# ─── Exceptions ───────────────────────────────────────────────────────────────
 
 class SourceError(Exception):
     """Базовая ошибка источника."""
 
-
 class SourceUnavailableError(SourceError):
     """Источник недоступен."""
-
 
 class SourceTimeoutError(SourceError):
     """Источник не ответил в отведённое время."""
 
-
 class TrackNotFoundError(SourceError):
     """Трек не найден."""
-
 
 class SourceFloodWaitError(SourceError):
     """Источник вернул FloodWait."""
@@ -70,8 +63,7 @@ class SourceFloodWaitError(SourceError):
         self.seconds = seconds
         super().__init__(f"FloodWait: {seconds}s")
 
-
-# ─── Abstract Base ───────────────────────────────────────────────────────────────────
+# ─── Abstract Base ────────────────────────────────────────────────────────────
 
 class MusicSource(ABC):
     """
@@ -83,9 +75,9 @@ class MusicSource(ABC):
     """
 
     # Обязательные атрибуты класса
-    name: str           # "VK Music Bot"
-    bot_username: str   # "vkmusic_bot"
-    source_type: str    # "telegram_bot" | "api" | "database"
+    name: str          # "VK Music Bot"
+    bot_username: str  # "vkmusic_bot"
+    source_type: str   # "telegram_bot" | "api" | "database"
 
     def __init__(
         self,
@@ -108,19 +100,8 @@ class MusicSource(ABC):
         ...
 
     @abstractmethod
-    async def get_audio(
-        self,
-        track: Track,
-        target_chat_id: int | None = None,
-    ) -> AudioFile:
-        """
-        Получить аудиофайл по треку.
-
-        target_chat_id — Telegram chat_id пользователя. Если указан,
-        userbot перешлёт аудио напрямую в чат пользователя
-        и возвращает AudioFile с already_sent=True.
-        aiogram-бот в этом случае не должен повторно отправлять файл.
-        """
+    async def get_audio(self, track: Track) -> AudioFile:
+        """Получить аудиофайл по треку."""
         ...
 
     @abstractmethod
@@ -128,13 +109,13 @@ class MusicSource(ABC):
         """Проверка доступности источника."""
         ...
 
-    # ── Опциональные методы ────────────────────────────────────────────────
+    # ── Опциональные методы ───────────────────────────────────────────────────
 
     async def get_page(self, query: str, page: int) -> SearchResult:
         """Получить конкретную страницу результатов. По умолчанию = search()."""
         return await self.search(query, page=page)
 
-    # ── Статистика ───────────────────────────────────────────────────────
+    # ── Статистика (вызывается из Search Manager) ─────────────────────────────
 
     def record_success(self, response_ms: float) -> None:
         self._success_count += 1
