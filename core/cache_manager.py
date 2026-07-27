@@ -8,18 +8,24 @@ from redis.asyncio import Redis
 from config.settings import settings
 from sources.base import AudioFile, SearchResult, Track
 
+# Версия схемы кэша поиска.
+# Увеличить при любом изменении формата Track.raw, чтобы автоматически
+# инвалидировать все старые записи в Redis без ручного FLUSHDB.
+# Текущая версия: 2 — добавлены search_chat_id, search_msg_id, parsed_at.
+_SEARCH_CACHE_VERSION = 2
+
 
 class CacheManager:
     """
     Все операции с Redis-кэшем в одном месте.
 
     Ключи:
-      search:{hash}          — SearchResult (список треков)
-      file:{unique_id}       — AudioFile (file_id для пересылки)
-      user:{id}:rate:{window} — sliding window rate limit
-      user:{id}:history      — история поиска (sorted set)
-      popular:queries        — топ запросов (sorted set)
-      userbot:{id}:status    — статус userbot в реальном времени
+      search:v{N}:{hash}    — SearchResult (список треков), N = _SEARCH_CACHE_VERSION
+      file:{unique_id}      — AudioFile (file_id для пересылки)
+      user:{id}:rate:{win}  — sliding window rate limit
+      user:{id}:history     — история поиска (sorted set)
+      popular:queries       — топ запросов (sorted set)
+      userbot:{id}:status   — статус userbot в реальном времени
     """
 
     def __init__(self, redis: Redis) -> None:
@@ -66,11 +72,10 @@ class CacheManager:
 
     async def set_audio(self, audio: AudioFile) -> None:
         key = f"file:{audio.telegram_unique_id}"
-        # BUG FIX: settings.CACHE_FILE_TTL does not exist; use CACHE_AUDIO_TTL
         await self._redis.set(
             key,
             json.dumps(asdict(audio)),
-            ex=settings.CACHE_AUDIO_TTL,
+            ex=settings.CACHE_FILE_TTL,
         )
 
     # ── Rate Limit (универсальный sliding window) ─────────────────────────────
@@ -84,6 +89,12 @@ class CacheManager:
     ) -> tuple[bool, int]:
         """
         Sliding window rate limit.
+
+        Args:
+            user_id: Telegram user id
+            max_requests: максимум запросов за window секунд
+            window: размер окна в секундах
+            key_suffix: суффикс ключа, например ":inline"
 
         Returns:
             (allowed, retry_after_seconds)
@@ -107,6 +118,7 @@ class CacheManager:
         key = f"user:{user_id}:history"
         score = time.time()
         await self._redis.zadd(key, {query: score})
+        # Храним последние 50 запросов
         await self._redis.zremrangebyrank(key, 0, -51)
         await self._redis.expire(key, 60 * 60 * 24 * 30)  # 30 дней
 
@@ -147,9 +159,15 @@ class CacheManager:
 
     @staticmethod
     def _search_key(query: str) -> str:
+        """
+        Ключ кэша поиска включает версию схемы (_SEARCH_CACHE_VERSION).
+        При изменении формата Track.raw достаточно увеличить константу —
+        все старые ключи (без версии или с меньшей версией) перестают находиться,
+        и кэш автоматически заполняется свежими данными.
+        """
         normalized = query.strip().lower()
         h = hashlib.md5(normalized.encode()).hexdigest()
-        return f"search:{h}"
+        return f"search:v{_SEARCH_CACHE_VERSION}:{h}"
 
     async def ping(self) -> bool:
         try:
