@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from collections import OrderedDict
 from collections.abc import Callable
 
 from aiogram import F, Router
@@ -14,13 +15,22 @@ from core.cache_manager import CacheManager
 from core.queue_manager import QueueManager
 from core.search_manager import SearchContext, SearchManager
 from infrastructure.database.models import User
-from sources.base import SearchResult, Track
+from sources.base import SearchResult
 
 logger = logging.getLogger(__name__)
 router = Router(name="search")
 
-# task_id → SearchResult (для пагинации и скачивания)
-_results_cache: dict[str, SearchResult] = {}
+# task_id → SearchResult (для пагинации и скачивания).
+# Ограничен по размеру: раньше словарь рос бесконечно и съедал память.
+RESULTS_CACHE_MAX = 2000
+_results_cache: OrderedDict[str, SearchResult] = OrderedDict()
+
+
+def _remember_result(task_id: str, result: SearchResult) -> None:
+    _results_cache[task_id] = result
+    _results_cache.move_to_end(task_id)
+    while len(_results_cache) > RESULTS_CACHE_MAX:
+        _results_cache.popitem(last=False)
 
 
 async def _safe_edit_reply_markup(callback: CallbackQuery, keyboard) -> None:
@@ -51,7 +61,8 @@ async def handle_search_query(
     ctx = SearchContext(query=query, user_id=user.id, page=1)
 
     try:
-        task = await queue.enqueue(ctx, is_premium=user.premium)
+        # Лимит уже проверен в RateLimitMiddleware — не списываем второй раз
+        task = await queue.enqueue(ctx, is_premium=user.premium, check_rate_limit=False)
         pos = queue.get_position(task.task_id)
 
         if pos and pos > 1:
@@ -79,7 +90,7 @@ async def handle_search_query(
         await wait_msg.edit_text(_("search-not-found", query=query))
         return
 
-    _results_cache[task.task_id] = result
+    _remember_result(task.task_id, result)
 
     keyboard = build_search_results_keyboard(result, task.task_id)
     await wait_msg.edit_text(
@@ -96,7 +107,6 @@ async def handle_download(
     cache: CacheManager,
     _: Callable,  # Имя обязательно '_' — aiogram инжектирует переводчик именно так
 ) -> None:
-    # BUG FIX: распаковываем в _dl_prefix, чтобы не перезаписывать параметр-переводчик '_'
     _dl_prefix, task_id, track_idx_str = callback.data.split(":", 2)
     track_idx = int(track_idx_str)
 
@@ -111,16 +121,23 @@ async def handle_download(
     await callback.answer()
 
     try:
-        # Передаём target_chat_id — userbot отправит аудио боту с пометкой,
-        # relay-хендлер бота автоматически перешлёт пользователю.
+        # target_chat_id — аккаунт отправит аудио боту с пометкой,
+        # relay-хендлер бота перешлёт его пользователю.
         audio = await search_manager.get_audio(
             track,
             user.id,
             target_chat_id=callback.from_user.id,
         )
 
-        # audio.already_sent=True — relay-хендлер уже отправил пользователю.
-        # Ничего дополнительно отправлять не нужно.
+        # Источник без relay (например HTTP API) — отправляем сами
+        file_ref = audio.telegram_file_id or audio.file_path
+        if not audio.already_sent and file_ref and isinstance(callback.message, Message):
+            await callback.message.answer_audio(
+                audio=file_ref,
+                title=audio.title or None,
+                performer=audio.artist or None,
+                duration=audio.duration or None,
+            )
 
         keyboard = build_search_results_keyboard(result, task_id)
         await _safe_edit_reply_markup(callback, keyboard)
@@ -157,9 +174,10 @@ async def handle_pagination(
     ctx = SearchContext(query=old_result.query, user_id=user.id, page=page)
 
     try:
-        task = await queue.enqueue(ctx, is_premium=user.premium)
+        # Листание страниц не списывает лимит поисков
+        task = await queue.enqueue(ctx, is_premium=user.premium, check_rate_limit=False)
         result = await queue.wait_for_result(task)
-        _results_cache[task_id] = result
+        _remember_result(task_id, result)
 
         keyboard = build_search_results_keyboard(result, task_id)
         await _safe_edit_reply_markup(callback, keyboard)

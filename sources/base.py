@@ -1,3 +1,5 @@
+import copy
+import weakref
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -29,6 +31,9 @@ class AudioFile:
     duration: int
     size: int
     file_path: str | None = None  # если скачан локально
+    # True — аудио уже доставлено пользователю (через relay-хендлер бота),
+    # дополнительно отправлять ничего не нужно.
+    already_sent: bool = False
 
 
 @dataclass
@@ -40,7 +45,6 @@ class SearchResult:
     has_next: bool = False
     source_name: str = ""
     query: str = ""
-    # BUG FIX: datetime.utcnow() is deprecated since Python 3.12 — use timezone-aware datetime
     fetched_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -97,6 +101,12 @@ class MusicSource(ABC):
         self._success_count = 0
         self._error_count = 0
         self._total_response_ms = 0.0
+        # Экземпляр, в который пишется статистика (у привязанных копий — родитель)
+        self._stats_owner: MusicSource = self
+        # client → привязанная копия источника (см. bind)
+        self._bound: weakref.WeakKeyDictionary[object, MusicSource] = (
+            weakref.WeakKeyDictionary()
+        )
 
     # ── Обязательные методы ───────────────────────────────────────────────────
 
@@ -106,7 +116,11 @@ class MusicSource(ABC):
         ...
 
     @abstractmethod
-    async def get_audio(self, track: Track) -> AudioFile:
+    async def get_audio(
+        self,
+        track: Track,
+        target_chat_id: int | None = None,
+    ) -> AudioFile:
         """Получить аудиофайл по треку."""
         ...
 
@@ -121,27 +135,57 @@ class MusicSource(ABC):
         """Получить конкретную страницу результатов. По умолчанию = search()."""
         return await self.search(query, page=page)
 
-    # ── Статистика (вызывается из Search Manager) ─────────────────────────────
+    def bind(self, client: object) -> "MusicSource":
+        """
+        Возвращает копию источника, привязанную к конкретному аккаунту.
+
+        Раньше SearchManager подменял `source._client` у ОДНОГО общего объекта.
+        При параллельных запросах два аккаунта перезаписывали клиента друг другу,
+        и запрос уходил не с того аккаунта. Теперь у каждого аккаунта своя копия.
+
+        Источники без `_client` (HTTP API) возвращают сами себя.
+        """
+        if client is None or not hasattr(self, "_client"):
+            return self
+        try:
+            bound = self._bound.get(client)
+        except TypeError:  # клиент не поддерживает weakref
+            bound = None
+        if bound is None:
+            bound = copy.copy(self)
+            bound.__dict__["_client"] = client
+            bound._stats_owner = self
+            bound._bound = weakref.WeakKeyDictionary()
+            try:
+                self._bound[client] = bound
+            except TypeError:
+                pass
+        return bound
+
+    # ── Статистика ────────────────────────────────────────────────────────────
 
     def record_success(self, response_ms: float) -> None:
-        self._success_count += 1
-        self._total_response_ms += response_ms
+        owner = self._stats_owner
+        owner._success_count += 1
+        owner._total_response_ms += response_ms
 
     def record_error(self) -> None:
-        self._error_count += 1
+        self._stats_owner._error_count += 1
 
     @property
     def avg_response_ms(self) -> float:
-        if self._success_count == 0:
+        owner = self._stats_owner
+        if owner._success_count == 0:
             return 0.0
-        return self._total_response_ms / self._success_count
+        return owner._total_response_ms / owner._success_count
 
     @property
     def error_rate(self) -> float:
-        total = self._success_count + self._error_count
+        owner = self._stats_owner
+        total = owner._success_count + owner._error_count
         if total == 0:
             return 0.0
-        return self._error_count / total
+        return owner._error_count / total
 
     def __repr__(self) -> str:
         return (

@@ -36,10 +36,6 @@ class SearchTask:
     audio:       AudioFile | None = None
     error:       str | None = None
 
-    # BUG FIX: asyncio.get_event_loop() is deprecated in Python 3.10+ when there is
-    # no running event loop. Use asyncio.get_running_loop() inside an async context,
-    # or initialise the Future lazily via a property to avoid the DeprecationWarning
-    # and potential RuntimeError in newer Python versions.
     _future: asyncio.Future = field(default=None, repr=False)  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
@@ -92,6 +88,7 @@ class QueueManager:
         )
         self._tasks: dict[str, SearchTask] = {}
         self._workers: list[asyncio.Task] = []
+        self._bg_tasks: set[asyncio.Task] = set()
         self._running = False
 
     # ── Жизненный цикл ────────────────────────────────────────────────────────
@@ -108,6 +105,8 @@ class QueueManager:
         self._running = False
         for w in self._workers:
             w.cancel()
+        for t in self._bg_tasks:
+            t.cancel()
         await asyncio.gather(*self._workers, return_exceptions=True)
         logger.info("QueueManager остановлен")
 
@@ -117,10 +116,13 @@ class QueueManager:
         self,
         ctx: SearchContext,
         is_premium: bool = False,
+        check_rate_limit: bool = True,
     ) -> SearchTask:
         """
         Добавить запрос в очередь.
-        Возвращает SearchTask — можно ждать результата через task._future.
+
+        check_rate_limit=False — когда лимит уже проверен (RateLimitMiddleware
+        бота), чтобы один поиск не списывался с лимита дважды.
         """
         if self._queue.full():
             raise OverflowError(
@@ -128,12 +130,12 @@ class QueueManager:
                 "Попробуйте позже."
             )
 
-        # Проверяем rate limit
-        allowed, retry_after = await self._cache.check_rate_limit(ctx.user_id)
-        if not allowed:
-            raise PermissionError(
-                f"Слишком много запросов. Подождите {retry_after} сек."
-            )
+        if check_rate_limit:
+            allowed, retry_after = await self._cache.check_rate_limit(ctx.user_id)
+            if not allowed:
+                raise PermissionError(
+                    f"Слишком много запросов. Подождите {retry_after} сек."
+                )
 
         priority = TaskPriority.HIGH if is_premium else TaskPriority.NORMAL
         task = SearchTask(
@@ -146,8 +148,9 @@ class QueueManager:
         # PriorityQueue: меньше = выше приоритет, поэтому инвертируем
         await self._queue.put((-priority.value, time.monotonic(), task))
 
-        # Таймер для автоматического истечения задачи
-        asyncio.create_task(self._expire_task(task))
+        expire = asyncio.create_task(self._expire_task(task))
+        self._bg_tasks.add(expire)
+        expire.add_done_callback(self._bg_tasks.discard)
 
         logger.debug(
             "Задача %s добавлена в очередь (priority=%s, size=%d)",
@@ -174,7 +177,6 @@ class QueueManager:
         task = self._tasks.get(task_id)
         if not task or task.status != TaskStatus.PENDING:
             return None
-        # Считаем задачи с более высоким приоритетом и более ранним временем
         position = sum(
             1 for t in self._tasks.values()
             if t.status == TaskStatus.PENDING
@@ -225,7 +227,7 @@ class QueueManager:
     # ── Статистика ────────────────────────────────────────────────────────────
 
     def get_stats(self) -> dict:
-        statuses = {}
+        statuses: dict[str, int] = {}
         for task in self._tasks.values():
             statuses[task.status.value] = statuses.get(task.status.value, 0) + 1
         return {

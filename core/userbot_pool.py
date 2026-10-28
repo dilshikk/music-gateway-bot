@@ -1,15 +1,23 @@
 import asyncio
 import logging
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 
 from pyrogram import Client
-from pyrogram.errors import FloodWait
 
 from infrastructure.database.models import Userbot, UserbotStatus
 from infrastructure.database.repositories.userbot_repo import UserbotRepository
-from sources.base import SourceFloodWaitError
 
 logger = logging.getLogger(__name__)
+
+
+def _as_utc(dt: datetime | None) -> datetime:
+    """Приводит дату к aware-UTC, чтобы сортировка не падала на naive/aware."""
+    if dt is None:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 class UserbotEntry:
@@ -19,6 +27,8 @@ class UserbotEntry:
         self.model  = model
         self.client = client
         self._lock  = asyncio.Lock()
+        # monotonic-время окончания последнего запроса (для паузы между запросами)
+        self.last_finished = 0.0
 
     @property
     def id(self) -> int:
@@ -55,13 +65,21 @@ class UserbotEntry:
 
 class UserbotPool:
     """
-    Пул Pyrogram userbot-аккаунтов.
+    Пул userbot-аккаунтов.
+
+    Правила:
+      - один аккаунт выполняет один запрос за раз (lock в UserbotEntry);
+      - между запросами одного аккаунта пауза ACCOUNT_COOLDOWN секунд;
+      - при FloodWait аккаунт отдыхает и сам возвращается в работу.
     """
+
+    # Пауза между запросами одного аккаунта — снижает риск FloodWait и бана
+    ACCOUNT_COOLDOWN = 3.0
 
     def __init__(self, repo: UserbotRepository) -> None:
         self._repo: UserbotRepository = repo
         self._pool: dict[int, UserbotEntry] = {}
-        self._rr_index = 0
+        self._bg_tasks: set[asyncio.Task] = set()
 
     # ── Жизненный цикл ────────────────────────────────────────────────────────
 
@@ -75,6 +93,8 @@ class UserbotPool:
 
     async def stop(self) -> None:
         """Останавливает всех клиентов."""
+        for task in self._bg_tasks:
+            task.cancel()
         for entry in self._pool.values():
             try:
                 await entry.client.stop()
@@ -121,11 +141,19 @@ class UserbotPool:
 
     # ── Выбор userbot ─────────────────────────────────────────────────────────
 
-    async def acquire_userbot(self) -> UserbotEntry | None:
-        candidates = sorted(
-            [e for e in self._pool.values() if e.is_available],
-            key=lambda e: (-e.model.weight, e.model.last_used or datetime.min),
-        )
+    async def acquire_userbot(self, userbot_id: int | None = None) -> UserbotEntry | None:
+        """
+        Занимает свободный аккаунт.
+        userbot_id — занять только конкретный аккаунт (например, тот, что делал поиск).
+        """
+        now = time.monotonic()
+        candidates = [
+            e for e in self._pool.values()
+            if e.is_available
+            and now - e.last_finished >= self.ACCOUNT_COOLDOWN
+            and (userbot_id is None or e.id == userbot_id)
+        ]
+        candidates.sort(key=lambda e: (-e.model.weight, _as_utc(e.model.last_used)))
 
         for entry in candidates:
             if await entry.acquire():
@@ -136,25 +164,35 @@ class UserbotPool:
 
     async def release_userbot(self, entry: UserbotEntry) -> None:
         """Освобождает userbot после выполнения запроса."""
-        entry.release()
-        entry.model.status      = UserbotStatus.IDLE
+        # Если аккаунт отключили из админки во время запроса — не включаем обратно
+        if entry.model.status == UserbotStatus.BUSY:
+            entry.model.status = UserbotStatus.IDLE
         entry.model.last_used   = datetime.now(timezone.utc)
         entry.model.requests_today += 1
         entry.model.requests_total += 1
+        entry.last_finished = time.monotonic()
+        entry.release()
         await self._repo.save(entry.model)
         logger.debug("Userbot #%d освобождён", entry.id)
 
     async def handle_flood_wait(self, entry: UserbotEntry, seconds: int) -> None:
         """Ставит userbot в режим FloodWait с авто-восстановлением."""
-        entry.release()
+        # Статус меняем ДО снятия lock, чтобы аккаунт не успел занять кто-то другой
         entry.model.status = UserbotStatus.FLOOD_WAIT
-        entry.model.flood_wait_until = datetime.now(timezone.utc)
+        entry.model.flood_wait_until = datetime.now(timezone.utc) + timedelta(seconds=seconds)
+        entry.last_finished = time.monotonic()
+        entry.release()
         await self._repo.save(entry.model)
         logger.warning("Userbot #%d FloodWait %ds", entry.id, seconds)
-        asyncio.create_task(self._recover_after_flood(entry, seconds))
+        task = asyncio.create_task(self._recover_after_flood(entry, seconds))
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
 
     async def _recover_after_flood(self, entry: UserbotEntry, seconds: int) -> None:
         await asyncio.sleep(seconds + 5)
+        # Не включаем аккаунт, если его за это время отключили или удалили
+        if entry.model.status != UserbotStatus.FLOOD_WAIT:
+            return
         entry.model.status = UserbotStatus.IDLE
         entry.model.flood_wait_until = None
         await self._repo.save(entry.model)
@@ -178,14 +216,10 @@ class UserbotPool:
                 await entry.client.stop()
             except Exception:
                 pass
-        # BUG FIX: was only setting status=DISABLED, leaving the record in DB.
-        # This caused get_by_phone() to find the "deleted" record and block re-adding.
-        # Now we do a real DELETE so the phone becomes available again.
         await self._repo.delete(userbot_id)
         logger.info("Userbot #%d удалён из БД", userbot_id)
 
     async def restart_userbot(self, userbot_id: int) -> bool:
-        # For restart we need the model before removing, so fetch it first
         model = await self._repo.get_by_id(userbot_id)
         if not model:
             return False

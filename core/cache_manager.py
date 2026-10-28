@@ -14,8 +14,8 @@ class CacheManager:
     Все операции с Redis-кэшем в одном месте.
 
     Ключи:
-        search:{hash}           — SearchResult (список треков)
-        file:{unique_id}        — AudioFile (file_id для пересылки)
+        search:{hash}:{page}    — SearchResult (список треков конкретной страницы)
+        file:{id}               — AudioFile (по telegram_unique_id и source_track_id)
         user:{id}:rate:{window} — sliding window rate limit
         user:{id}:history       — история поиска (sorted set)
         popular:queries         — топ запросов (sorted set)
@@ -27,8 +27,8 @@ class CacheManager:
 
     # ── Поиск ─────────────────────────────────────────────────────────────────
 
-    async def get_search(self, query: str) -> SearchResult | None:
-        key = self._search_key(query)
+    async def get_search(self, query: str, page: int = 1) -> SearchResult | None:
+        key = self._search_key(query, page)
         raw = await self._redis.get(key)
         if not raw:
             return None
@@ -43,8 +43,8 @@ class CacheManager:
             query=data["query"],
         )
 
-    async def set_search(self, query: str, result: SearchResult) -> None:
-        key = self._search_key(query)
+    async def set_search(self, query: str, result: SearchResult, page: int = 1) -> None:
+        key = self._search_key(query, page)
         data = {
             "tracks": [asdict(t) for t in result.tracks],
             "total": result.total,
@@ -64,13 +64,17 @@ class CacheManager:
             return None
         return AudioFile(**json.loads(raw))
 
-    async def set_audio(self, audio: AudioFile) -> None:
-        key = f"file:{audio.telegram_unique_id}"
-        await self._redis.set(
-            key,
-            json.dumps(asdict(audio)),
-            ex=settings.CACHE_FILE_TTL,
-        )
+    async def set_audio(self, audio: AudioFile, alias: str | None = None) -> None:
+        """
+        Сохраняет аудио по telegram_unique_id и (опционально) по alias —
+        обычно source_track_id, по которому SearchManager ищет в кэше.
+        """
+        payload = json.dumps(asdict(audio))
+        keys = {f"file:{audio.telegram_unique_id}"} if audio.telegram_unique_id else set()
+        if alias:
+            keys.add(f"file:{alias}")
+        for key in keys:
+            await self._redis.set(key, payload, ex=settings.CACHE_AUDIO_TTL)
 
     # ── Rate Limit (универсальный sliding window) ─────────────────────────────
 
@@ -82,13 +86,7 @@ class CacheManager:
         key_suffix: str = "",
     ) -> tuple[bool, int]:
         """
-        Sliding window rate limit.
-
-        Args:
-            user_id:      Telegram user id
-            max_requests: максимум запросов за window секунд
-            window:       размер окна в секундах
-            key_suffix:   суффикс ключа, например ":inline"
+        Fixed-window rate limit.
 
         Returns:
             (allowed, retry_after_seconds)
@@ -152,10 +150,10 @@ class CacheManager:
     # ── Вспомогательное ───────────────────────────────────────────────────────
 
     @staticmethod
-    def _search_key(query: str) -> str:
+    def _search_key(query: str, page: int = 1) -> str:
         normalized = query.strip().lower()
         h = hashlib.md5(normalized.encode()).hexdigest()
-        return f"search:{h}"
+        return f"search:{h}:{page}"
 
     async def ping(self) -> bool:
         try:
