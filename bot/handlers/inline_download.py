@@ -11,18 +11,13 @@
 import logging
 
 from aiogram import F, Router
-from aiogram.filters import Command
-from aiogram.types import (
-    CallbackQuery,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    Message,
-)
+from aiogram.types import CallbackQuery
 
 from core.cache_manager import CacheManager
 from core.search_manager import SearchManager
 from infrastructure.database.models import User
 from infrastructure.i18n.translator import t
+from sources.base import Track
 
 logger = logging.getLogger(__name__)
 
@@ -38,15 +33,11 @@ async def inline_download(
     _,
 ) -> None:
     """
-    Скачивает трек по source_track_id и отправляет в текущий чат.
-    После загрузки file_id попадает в кэш.
+    Скачивает трек по source_track_id и отправляет пользователю.
     """
     source_track_id = callback.data[len("inline_dl:"):]
 
     await callback.answer(_("download-processing"))
-
-    # Ищем трек в поисковом кэше
-    from sources.base import Track
 
     # Минимальный объект трека для get_audio
     track = Track(
@@ -58,10 +49,18 @@ async def inline_download(
     )
 
     try:
-        audio = await search_manager.get_audio(track, user_id=user.telegram_id)
+        audio = await search_manager.get_audio(
+            track,
+            user_id=user.telegram_id,
+            target_chat_id=callback.from_user.id,
+        )
     except Exception as e:
         logger.error("[InlineDL] Error: %s", e)
         await callback.message.answer(_("download-error"))  # type: ignore[union-attr]
+        return
+
+    # Через relay аудио уже доставлено пользователю
+    if audio.already_sent:
         return
 
     await callback.message.answer_audio(  # type: ignore[union-attr]

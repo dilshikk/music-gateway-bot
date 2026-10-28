@@ -9,6 +9,7 @@ x-common: &common
 services:
 
   # ── Основной бот ─────────────────────────────────────────────────────────────
+  # Бот сам держит пул аккаунтов и очередь: каждый аккаунт живёт в ОДНОМ процессе.
   bot:
     <<: *common
     build:
@@ -31,8 +32,12 @@ services:
       retries: 3
 
   # ── Воркер очереди ────────────────────────────────────────────────────────────
+  # ВЫКЛЮЧЕН по умолчанию: он запускает те же аккаунты, что и бот. Одна сессия
+  # в двух процессах = AUTH_KEY_DUPLICATED и риск бана. Включится, когда очередь
+  # переедет в Redis (часть 2). Запуск вручную: docker compose --profile worker up
   worker:
     <<: *common
+    profiles: ["worker"]
     build:
       context: .
       dockerfile: Dockerfile
@@ -42,8 +47,11 @@ services:
       - bot
     volumes:
       - ./sessions:/app/sessions
-    deploy:
-      replicas: 2  # можно масштабировать горизонтально
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'core.worker' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   # ── FastAPI внутренний API ────────────────────────────────────────────────────
   api:
@@ -52,12 +60,12 @@ services:
       context: .
       dockerfile: Dockerfile
       target: final
+    # --loop uvloop убран: uvloop не установлен (uvicorn без [standard])
     command: >
       uvicorn api.main:app
       --host 0.0.0.0
       --port 8000
       --workers 2
-      --loop uvloop
     ports:
       - "127.0.0.1:8000:8000"  # только localhost, снаружи через nginx
     healthcheck:

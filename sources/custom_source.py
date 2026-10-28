@@ -249,17 +249,17 @@ class CustomMusicSource(MusicSource):
 
     # ── Получение аудио ───────────────────────────────────────────────────────
 
-    async def get_audio(self, track: Track) -> AudioFile:
+    async def get_audio(
+        self,
+        track: Track,
+        target_chat_id: int | None = None,
+    ) -> AudioFile:
         """
         Получает аудиофайл трека.
 
         Для HTTP-источника source_track_id — это либо прямой URL (audio_url),
         либо ID трека для запроса отдельного эндпоинта /tracks/{id}/download.
-
-        В реальном боте этот метод должен:
-          1. Скачать файл во временный путь, ИЛИ
-          2. Передать Telegram прямую ссылку через input_file_url
-        Здесь мы возвращаем AudioFile с file_path для дальнейшей обработки.
+        target_chat_id не используется: бот отправит файл сам (already_sent=False).
         """
         start = time.monotonic()
         try:
