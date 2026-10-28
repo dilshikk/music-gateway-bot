@@ -38,7 +38,7 @@ class _IntegrationSource(MusicSource):
             source_name=self.name,
         )
 
-    async def get_audio(self, track: Track) -> AudioFile:
+    async def get_audio(self, track: Track, target_chat_id: int | None = None) -> AudioFile:
         return AudioFile(
             telegram_file_id="INT_FILE_ID",
             telegram_unique_id="int_unique",
@@ -56,7 +56,7 @@ class _IntegrationSource(MusicSource):
 async def full_stack(fake_redis, db_session):
     """Собирает полный стек компонентов для интеграционного теста."""
     cache    = CacheManager(fake_redis)
-    repo     = UserbotRepository(db_session)
+    _repo    = UserbotRepository(db_session)
     pool     = AsyncMock(spec=UserbotPool)
 
     model  = UserbotFactory.build(id=1, status=UserbotStatus.IDLE)
@@ -118,6 +118,6 @@ class TestFullSearchFlow:
 
         result = await search.search(ctx)
         track  = result.tracks[0]
-        audio  = await search.get_audio(track, user_id=3)
+        audio  = await search.get_audio(track, user_id=3, target_chat_id=3)
 
         assert audio.telegram_file_id == "INT_FILE_ID"
